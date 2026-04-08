@@ -716,6 +716,7 @@ async function spawnWorker(employeeId) {
 function renderWorkers(workers) {
   lastWorkers = workers || [];
   renderMembers(); // refresh online dots
+  renderTeam(); // refresh spawn/stop buttons
 
   const el = document.getElementById('workersView');
   if (!el) return;
@@ -752,6 +753,11 @@ async function killWorker(workerId, nick) {
   if (!confirm(`Kill worker for ${nick}?`)) return;
   await fetch(`/api/workers/${workerId}/kill`, { method: 'POST' });
   loadWorkers();
+}
+
+async function killWorkerByEmp(employeeId, nick) {
+  const w = lastWorkers.find(w => w.employee_id === employeeId && (w.status === 'online' || w.status === 'busy'));
+  if (w) killWorker(w.id, nick);
 }
 
 let logEventSource = null;
@@ -1328,11 +1334,18 @@ function renderTeam() {
   el.innerHTML = members.map(m => {
     const roleColor = m.role === 'commander' ? 'var(--yellow)' : m.role === 'ceo' ? 'var(--accent)' : 'var(--text2)';
     const isWorker = m.role !== 'commander' && m.role !== 'ceo';
-    const employedBadge = isWorker
+    const canSpawn = m.role !== 'commander';
+    const employedBadge = canSpawn
       ? `<span class="emp-badge ${m.employed ? 'employed' : 'not-employed'}">${m.employed ? 'Employed' : 'Not Employed'}</span>`
       : '';
-    const employedToggle = isWorker
+    const employedToggle = canSpawn
       ? `<button class="emp-toggle" onclick="toggleEmployed(${m.id}, ${m.employed ? 0 : 1})">${m.employed ? 'Release' : 'Employ'}</button>`
+      : '';
+    const hasWorker = lastWorkers.some(w => w.employee_id === m.id && (w.status === 'online' || w.status === 'busy'));
+    const spawnBtn = canSpawn && !hasWorker
+      ? `<button class="btn" style="border-color:var(--green);color:var(--green);padding:2px 8px;font-size:11px" onclick="spawnWorker(${m.id})">▶ Spawn</button>`
+      : canSpawn && hasWorker
+      ? `<button class="btn" style="border-color:var(--red);color:var(--red);padding:2px 8px;font-size:11px" onclick="killWorkerByEmp(${m.id}, '${escHtml(m.nickname)}')">■ Stop</button>`
       : '';
     return `<div class="emp-card" id="emp-card-${m.id}">
       <div class="emp-header">
@@ -1365,7 +1378,7 @@ function renderTeam() {
       </div>
       <div class="emp-footer">
         <span>${m.last_connected ? 'Last seen: ' + new Date(m.last_connected + 'Z').toLocaleString() : 'Never connected'}</span>
-        <div style="display:flex;gap:4px">${employedToggle}<button class="btn primary" id="save-persona-${m.id}" style="display:none" onclick="savePersona(${m.id})">Save</button></div>
+        <div style="display:flex;gap:4px">${spawnBtn}${employedToggle}<button class="btn primary" id="save-persona-${m.id}" style="display:none" onclick="savePersona(${m.id})">Save</button></div>
       </div>
     </div>`;
   }).join('');
