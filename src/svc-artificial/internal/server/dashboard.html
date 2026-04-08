@@ -1,0 +1,1652 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Artificial — Dashboard</title>
+<style>
+:root {
+  --bg: #0d1117; --bg2: #161b22; --bg3: #21262d; --border: #30363d;
+  --text: #e6edf3; --text2: #8b949e; --text3: #484f58;
+  --accent: #58a6ff; --green: #3fb950; --yellow: #d29922; --red: #f85149;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--bg3); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--border); }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif; background: var(--bg); color: var(--text); height: 100vh; display: flex; flex-direction: column; }
+header { background: var(--bg2); border-bottom: 1px solid var(--border); padding: 8px 16px; display: flex; align-items: center; gap: 12px; }
+header h1 { font-size: 14px; font-weight: 600; }
+header .tabs { display: flex; gap: 4px; margin-left: auto; }
+header .tab { padding: 4px 12px; border-radius: 6px; cursor: pointer; font-size: 12px; color: var(--text2); background: transparent; border: 1px solid transparent; }
+header .tab.active { background: var(--bg3); color: var(--text); border-color: var(--border); }
+header .tab:hover { color: var(--text); }
+.status-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+.status-dot.online { background: var(--green); }
+.status-dot.offline { background: var(--text3); }
+main { flex: 1; display: flex; overflow: hidden; }
+
+/* Sidebar */
+.sidebar { width: 220px; background: var(--bg2); border-right: 1px solid var(--border); display: flex; flex-direction: column; overflow-y: auto; }
+.sidebar-section { padding: 8px 12px; }
+.sidebar-section h3 { font-size: 10px; text-transform: uppercase; color: var(--text3); margin-bottom: 6px; letter-spacing: 0.5px; }
+.sidebar-item { padding: 4px 8px; border-radius: 4px; cursor: pointer; font-size: 12px; color: var(--text2); display: flex; align-items: center; gap: 6px; }
+.sidebar-item:hover, .sidebar-item.active { background: var(--bg3); color: var(--text); }
+.sidebar-item .badge { background: var(--accent); color: #fff; font-size: 9px; padding: 1px 5px; border-radius: 8px; margin-left: auto; }
+
+/* Chat panel */
+.chat { flex: 1; display: flex; flex-direction: column; }
+.chat-header { padding: 8px 16px; border-bottom: 1px solid var(--border); font-size: 12px; display: flex; align-items: center; gap: 8px; }
+.chat-header .topic { color: var(--text2); font-size: 11px; }
+.chat-messages { flex: 1; padding: 8px 16px; overflow-y: auto; display: flex; flex-direction: column; gap: 4px; }
+.chat-msg { font-size: 12px; line-height: 1.5; }
+.chat-msg .sender { font-weight: 600; color: var(--accent); margin-right: 4px; }
+.chat-msg .sender.commander { color: var(--yellow); }
+.chat-msg .time { font-size: 9px; color: var(--text3); margin-left: 4px; }
+.chat-msg .text { color: var(--text2); }
+.chat-input-wrap { padding: 8px 16px; border-top: 1px solid var(--border); }
+.chat-input { width: 100%; background: var(--bg3); border: 1px solid var(--border); border-radius: 6px; padding: 8px 12px; color: var(--text); font-size: 12px; resize: none; outline: none; font-family: inherit; }
+.chat-input:focus { border-color: var(--accent); }
+
+/* Right panel */
+.right-panel { width: 240px; background: var(--bg2); border-left: 1px solid var(--border); overflow-y: auto; }
+.right-panel .sidebar-section { border-bottom: 1px solid var(--border); }
+.rp-tabs { display: flex; gap: 0; padding: 8px 8px 0; }
+.rp-tab { font-size: 11px; font-weight: 600; padding: 4px 10px; cursor: pointer; color: var(--text3); border-bottom: 2px solid transparent; }
+.rp-tab:hover { color: var(--text2); }
+.rp-tab.active { color: var(--text); border-bottom-color: var(--accent); }
+.worker-card { padding: 6px 8px; border-radius: 4px; background: var(--bg); margin-bottom: 4px; font-size: 11px; }
+.worker-card .nick { font-weight: 600; }
+.worker-card .meta { color: var(--text3); font-size: 10px; }
+
+/* Board view */
+.board { flex: 1; display: none; overflow-x: auto; padding: 12px; gap: 12px; }
+.board.active { display: flex; }
+.board-col { min-width: 220px; flex: 1; background: var(--bg2); border-radius: 8px; border: 1px solid var(--border); display: flex; flex-direction: column; }
+.board-col h3 { padding: 8px 12px; font-size: 11px; text-transform: uppercase; color: var(--text3); border-bottom: 1px solid var(--border); }
+.board-col .tasks { flex: 1; padding: 8px; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; }
+.task-card { padding: 8px; background: var(--bg); border-radius: 6px; border: 1px solid var(--border); font-size: 11px; cursor: pointer; }
+.task-card:hover { border-color: var(--accent); }
+.task-card .title { font-weight: 600; margin-bottom: 2px; }
+.task-card .meta { color: var(--text3); font-size: 10px; }
+
+/* Chat view wrapper */
+.chat-view { flex: 1; display: none; }
+.chat-view.active { display: flex; }
+
+/* Projects view */
+.projects-view { flex: 1; display: none; padding: 12px; gap: 12px; flex-wrap: wrap; align-content: flex-start; overflow-y: auto; }
+.projects-view.active { display: flex; }
+.project-card { width: 300px; background: var(--bg2); border: 1px solid var(--border); border-radius: 8px; display: flex; flex-direction: column; }
+.project-card .project-header { padding: 10px 12px; border-bottom: 1px solid var(--border); }
+.project-card .project-header h3 { font-size: 13px; font-weight: 600; margin-bottom: 2px; }
+.project-card .project-header .path { font-size: 10px; color: var(--text3); word-break: break-all; }
+.project-card .project-header .remote { font-size: 10px; color: var(--text2); }
+.project-card .project-tasks { padding: 8px; flex: 1; display: flex; flex-direction: column; gap: 4px; max-height: 300px; overflow-y: auto; }
+.project-card .project-footer { padding: 6px 12px; border-top: 1px solid var(--border); font-size: 10px; color: var(--text3); display: flex; justify-content: space-between; align-items: center; }
+.project-card .project-footer .btn { font-size: 10px; padding: 2px 8px; }
+
+/* Team view */
+.emp-card { width: 340px; background: var(--bg2); border: 1px solid var(--border); border-radius: 8px; display: flex; flex-direction: column; }
+.emp-card .emp-header { padding: 10px 12px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 8px; }
+.emp-card .emp-header .emp-id { font-size: 10px; color: var(--text3); background: var(--bg3); padding: 1px 6px; border-radius: 4px; }
+.emp-card .emp-header .emp-nick { font-size: 13px; font-weight: 600; }
+.emp-card .emp-header .emp-role { font-size: 10px; color: var(--text2); margin-left: auto; }
+.emp-card .emp-body { padding: 10px 12px; flex: 1; }
+.emp-card .emp-body textarea { width: 100%; background: var(--bg); border: 1px solid var(--border); border-radius: 4px; padding: 6px 8px; color: var(--text); font-size: 11px; font-family: 'SF Mono', 'Fira Code', monospace; resize: vertical; min-height: 80px; }
+.emp-card .emp-body textarea:focus { border-color: var(--accent); outline: none; }
+.emp-card .emp-footer { padding: 6px 12px; border-top: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; font-size: 10px; color: var(--text3); }
+.emp-badge { font-size: 10px; font-weight: 600; padding: 1px 8px; border-radius: 4px; }
+.emp-badge.employed { background: rgba(63,185,80,0.15); color: var(--green); }
+.emp-badge.not-employed { background: var(--bg3); color: var(--text3); }
+.emp-toggle { font-size: 10px; padding: 2px 8px; cursor: pointer; background: transparent; border: 1px solid var(--border); border-radius: 4px; color: var(--text2); }
+.emp-toggle:hover { border-color: var(--accent); color: var(--text); }
+.emp-channels { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
+.emp-ch-tag { font-size: 9px; padding: 1px 6px; border-radius: 3px; background: var(--bg3); color: var(--text2); }
+.emp-harness { font-size: 9px; padding: 1px 6px; border-radius: 3px; background: rgba(88,166,255,0.1); color: var(--accent); }
+.emp-model { font-size: 9px; padding: 1px 6px; border-radius: 3px; background: rgba(210,168,255,0.1); color: #d2a8ff; }
+.emp-config { display: flex; gap: 6px; margin-top: 6px; align-items: center; }
+.emp-config select, .emp-config input { font-size: 10px; padding: 2px 6px; background: var(--bg); border: 1px solid var(--border); border-radius: 4px; color: var(--text); }
+.emp-config select { width: 80px; }
+.emp-config input { width: 70px; }
+.emp-config label { font-size: 9px; color: var(--text3); }
+
+/* Reviews */
+.review-card { width: 400px; background: var(--bg2); border: 1px solid var(--border); border-radius: 8px; display: flex; flex-direction: column; }
+.review-card .review-header { padding: 10px 12px; border-bottom: 1px solid var(--border); }
+.review-card .review-header h3 { font-size: 13px; font-weight: 600; margin-bottom: 2px; }
+.review-card .review-header .review-from { font-size: 10px; color: var(--text3); }
+.review-card .review-body { padding: 10px 12px; flex: 1; }
+.review-card .review-body .review-desc { font-size: 11px; color: var(--text2); margin-bottom: 8px; line-height: 1.5; }
+.review-card .review-options { display: flex; flex-wrap: wrap; gap: 8px; }
+.review-card .review-option { padding: 8px 12px; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; cursor: pointer; font-size: 12px; text-align: center; flex: 1; min-width: 120px; max-width: 250px; transition: border-color 0.15s; }
+.review-card .review-option:hover { border-color: var(--accent); }
+.review-card .review-option.selected { border-color: var(--accent); background: rgba(88,166,255,0.1); color: var(--accent); }
+.review-card .review-option img { max-width: 100%; max-height: 200px; object-fit: contain; border-radius: 4px; margin-bottom: 6px; display: block; }
+.review-card .review-option .opt-label { font-weight: 500; }
+.review-card .review-actions { padding: 8px 12px; border-top: 1px solid var(--border); display: flex; gap: 8px; }
+
+/* Log viewer */
+.log-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.7); z-index: 100; padding: 24px; }
+.log-overlay.active { display: flex; flex-direction: column; }
+.log-header { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.log-header h2 { font-size: 14px; margin-right: 8px; }
+.log-header .tabs { margin: 0; }
+.log-header .log-tab { padding: 4px 12px; border-radius: 6px; cursor: pointer; font-size: 11px; color: var(--text2); background: transparent; border: 1px solid transparent; }
+.log-header .log-tab.active { background: var(--bg3); color: var(--text); border-color: var(--border); }
+.log-header .log-tab:hover { color: var(--text); }
+.log-header .btn { font-size: 11px; }
+.log-header .spacer { flex: 1; }
+.log-content { flex: 1; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; overflow-y: auto; padding: 8px; font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace; font-size: 11px; line-height: 1.5; color: var(--text2); }
+.log-line { padding: 2px 6px; border-radius: 3px; }
+.log-line + .log-line { margin-top: 1px; }
+.log-slog { color: var(--text3); font-size: 10px; }
+.log-slog .lvl-info { color: var(--accent); }
+.log-slog .lvl-warn { color: var(--yellow); }
+.log-slog .lvl-error { color: var(--red); }
+.log-text { color: var(--text); white-space: pre-wrap; word-break: break-word; }
+.log-tool { background: var(--bg2); display: flex; align-items: center; gap: 6px; }
+.log-tool .tool-badge { font-size: 9px; font-weight: 600; padding: 1px 6px; border-radius: 3px; text-transform: uppercase; }
+.log-tool .tool-badge.tool-bash { background: #2d333b; color: var(--green); }
+.log-tool .tool-badge.tool-file { background: #2d333b; color: var(--accent); }
+.log-tool .tool-badge.tool-search { background: #2d333b; color: var(--yellow); }
+.log-tool .tool-badge.tool-web { background: #2d333b; color: #d2a8ff; }
+.log-tool .tool-badge.tool-mcp { background: #2d333b; color: #f0883e; }
+.log-tool .tool-badge.tool-other { background: #2d333b; color: var(--text2); }
+.log-tool .tool-detail { color: var(--text3); font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.log-result { color: var(--green); font-weight: 600; }
+.log-error { color: var(--red); }
+.log-system { color: var(--text3); font-size: 10px; font-style: italic; }
+
+/* Popover */
+.popover { display: none; position: fixed; z-index: 200; background: var(--bg2); border: 1px solid var(--border); border-radius: 6px; padding: 4px; min-width: 160px; box-shadow: 0 4px 12px rgba(0,0,0,0.4); }
+.popover.active { display: block; }
+.popover-item { padding: 6px 10px; font-size: 11px; border-radius: 4px; cursor: pointer; color: var(--text); }
+.popover-item:hover { background: var(--bg3); }
+.popover-item.disabled { color: var(--text3); pointer-events: none; }
+
+/* Worker cards (in Workers view) */
+.wk-card { width: 300px; background: var(--bg2); border: 1px solid var(--border); border-radius: 8px; padding: 12px; display: flex; flex-direction: column; gap: 6px; }
+.wk-card .wk-header { display: flex; align-items: center; gap: 8px; }
+.wk-card .wk-nick { font-size: 13px; font-weight: 600; }
+.wk-card .wk-status { font-size: 10px; padding: 1px 6px; border-radius: 4px; }
+.wk-card .wk-status.online { background: rgba(63,185,80,0.15); color: var(--green); }
+.wk-card .wk-status.offline { background: var(--bg3); color: var(--text3); }
+.wk-card .wk-meta { font-size: 10px; color: var(--text3); }
+.wk-card .wk-actions { display: flex; gap: 6px; margin-top: 4px; }
+.wk-card .wk-actions .btn { font-size: 10px; padding: 3px 8px; }
+
+/* Modals */
+.modal-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 100; align-items: center; justify-content: center; }
+.modal-overlay.active { display: flex; }
+.modal { background: var(--bg2); border: 1px solid var(--border); border-radius: 8px; padding: 20px; min-width: 360px; }
+.modal h2 { font-size: 14px; margin-bottom: 12px; }
+.modal label { font-size: 11px; color: var(--text2); display: block; margin-bottom: 4px; margin-top: 8px; }
+.modal input, .modal textarea, .modal select { width: 100%; background: var(--bg3); border: 1px solid var(--border); border-radius: 4px; padding: 6px 10px; color: var(--text); font-size: 12px; font-family: inherit; }
+.modal .actions { display: flex; gap: 8px; margin-top: 16px; justify-content: flex-end; }
+.btn { padding: 6px 14px; border-radius: 6px; border: 1px solid var(--border); background: var(--bg3); color: var(--text); font-size: 12px; cursor: pointer; }
+.btn:hover { background: var(--border); }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.btn.primary:hover { opacity: 0.9; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Artificial</h1>
+  <span class="status-dot" id="connDot"></span>
+  <div class="tabs">
+    <div class="tab active" data-view="chat" onclick="switchView('chat')">Chat</div>
+    <div class="tab" data-view="board" onclick="switchView('board')">Board</div>
+    <div class="tab" data-view="projects" onclick="switchView('projects')">Projects</div>
+    <div class="tab" data-view="team" onclick="switchView('team')">Team</div>
+    <div class="tab" data-view="workers" onclick="switchView('workers')">Workers</div>
+    <div class="tab" data-view="reviews" onclick="switchView('reviews')">Reviews <span id="reviewBadge" class="badge" style="display:none">0</span></div>
+    <div class="tab" data-view="settings" onclick="switchView('settings')">Settings</div>
+  </div>
+  <div style="display:flex;gap:6px;margin-left:8px">
+    <button class="btn" style="padding:4px 10px;font-size:11px" onclick="openEmployeeModal()">+ Employee</button>
+    <button class="btn" style="padding:4px 10px;font-size:11px" onclick="showModal('projectModal')">+ Project</button>
+    <button class="btn" style="padding:4px 10px;font-size:11px" onclick="showModal('taskModal')">+ Task</button>
+    <button class="btn" style="padding:4px 10px;font-size:11px;border-color:var(--green);color:var(--green)" onclick="respawnAll()">▶ Respawn Employed</button>
+    <button class="btn" style="padding:4px 10px;font-size:11px;border-color:var(--red);color:var(--red)" onclick="killAll()">⏹ Kill All</button>
+  </div>
+</header>
+
+<main>
+  <!-- Chat View -->
+  <div class="chat-view active" id="chatView">
+    <div class="sidebar" id="sidebar">
+      <div class="sidebar-section">
+        <h3>Channels</h3>
+        <div id="channelList"></div>
+      </div>
+      <div class="sidebar-section">
+        <h3>Direct Messages</h3>
+        <div id="dmList"></div>
+      </div>
+    </div>
+    <div class="chat" id="chatPanel">
+      <div class="chat-header">
+        <span id="chatTitle">#general</span>
+        <span class="topic" id="chatTopic" onclick="editTopic()" style="cursor:pointer" title="Click to edit topic"></span>
+      </div>
+      <div class="chat-messages" id="chatMessages"></div>
+      <div class="chat-input-wrap">
+        <textarea class="chat-input" id="chatInput" placeholder="Message as commander... (Shift+Enter to send)" rows="2"></textarea>
+      </div>
+    </div>
+    <div class="right-panel">
+      <div class="sidebar-section">
+        <div class="rp-tabs">
+          <span class="rp-tab active" id="rpTabMembers" onclick="switchRPTab('members')">Members</span>
+          <span class="rp-tab" id="rpTabTeam" onclick="switchRPTab('team')">Team</span>
+        </div>
+        <div id="memberListChannel"></div>
+        <div id="memberList" style="display:none"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Board View -->
+  <div class="board" id="boardView">
+    <div class="board-col"><h3>Backlog</h3><div class="tasks" data-status="backlog"></div></div>
+    <div class="board-col"><h3>Todo</h3><div class="tasks" data-status="todo"></div></div>
+    <div class="board-col"><h3>In Progress</h3><div class="tasks" data-status="in_progress"></div></div>
+    <div class="board-col"><h3>In QA</h3><div class="tasks" data-status="in_qa"></div></div>
+    <div class="board-col"><h3>Done</h3><div class="tasks" data-status="done"></div></div>
+  </div>
+
+  <!-- Projects View -->
+  <div class="projects-view" id="projectsView"></div>
+
+  <!-- Team View -->
+  <div class="projects-view" id="teamView"></div>
+
+  <!-- Workers View -->
+  <div class="projects-view" id="workersView"></div>
+
+  <!-- Reviews View -->
+  <div class="projects-view" id="reviewsView"></div>
+
+  <!-- Settings View -->
+  <div class="projects-view" id="settingsView" style="padding:20px;max-width:600px">
+    <div class="emp-card" style="width:100%">
+      <div class="emp-header"><span class="emp-nick">Company Settings</span></div>
+      <div class="emp-body">
+        <label style="font-size:11px;color:var(--text2);display:block;margin-bottom:4px">Company Knowledge Path</label>
+        <input id="settingKnowledgePath" style="width:100%;background:var(--bg);border:1px solid var(--border);border-radius:4px;padding:6px 8px;color:var(--text);font-size:12px" placeholder="/path/to/company/knowledge">
+        <div style="font-size:10px;color:var(--text3);margin-top:4px">Path to a directory with a README.md containing shared docs, CLI tool references, and conventions. Agents are told to read this on startup.</div>
+      </div>
+      <div class="emp-footer">
+        <span></span>
+        <button class="btn primary" onclick="saveSettings()">Save</button>
+      </div>
+    </div>
+  </div>
+</main>
+
+<!-- Member popover -->
+<div class="popover" id="memberPopover">
+  <div class="popover-item" id="popDm" onclick="popoverDM()">💬 Direct Message</div>
+  <div class="popover-item" id="popLogs" onclick="popoverLogs()">📄 View Logs</div>
+  <div class="popover-item" id="popSpawn" onclick="popoverSpawn()">▶ Spawn Worker</div>
+  <div class="popover-item" id="popKill" onclick="popoverKill()">⏹ Kill Worker</div>
+</div>
+
+<!-- Log Viewer -->
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css">
+<script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
+<div class="log-overlay" id="logOverlay">
+  <div class="log-header">
+    <h2 id="logTitle">Worker</h2>
+    <div class="log-tab active" data-logtab="logs" onclick="switchLogTab('logs')">Logs</div>
+    <div class="log-tab" data-logtab="transcript" onclick="switchLogTab('transcript')">Transcript</div>
+    <div class="log-tab" data-logtab="tty" onclick="switchLogTab('tty')">TTY</div>
+    <div class="spacer"></div>
+    <button class="btn" onclick="sendWorkerCommand('/compact')">/compact</button>
+    <button class="btn" onclick="closeLogViewer()">Close</button>
+  </div>
+  <div class="log-content" id="logContent"></div>
+  <div class="log-content" id="transcriptContent" style="display:none"></div>
+  <div id="ttyContainer" style="display:none;flex:1;background:#000;border-radius:8px;overflow:hidden"></div>
+  <div style="display:flex;gap:8px;margin-top:8px">
+    <input class="chat-input" id="workerMsgInput" placeholder="Send message to this worker's channel... (Enter to send)" style="flex:1;padding:6px 10px;font-size:12px">
+    <button class="btn primary" onclick="sendWorkerMessage()">Send</button>
+  </div>
+</div>
+
+<!-- Employee Modal -->
+<div class="modal-overlay" id="employeeModal">
+<div class="modal" style="min-width:480px">
+  <h2>New Employee</h2>
+  <label>Nickname</label>
+  <div style="display:flex;gap:6px">
+    <input id="empNick" style="flex:1">
+    <button class="btn" onclick="suggestName()" title="Random name">🎲</button>
+  </div>
+  <label>Role</label>
+  <select id="empRole"><option value="worker">Worker</option><option value="ceo">CEO</option></select>
+  <label>Email</label><input id="empEmail">
+  <div style="display:flex;gap:8px">
+    <div style="flex:1"><label>Harness</label><select id="empHarness"><option value="claude">Claude</option><option value="codex">Codex</option><option value="acp">ACP</option></select></div>
+    <div style="flex:1"><label>Model</label><input id="empModel" value="opus" placeholder="e.g. opus, sonnet"></div>
+  </div>
+  <div id="empAcpProviderWrap" style="display:none">
+    <label>ACP Provider</label>
+    <select id="empAcpProvider" onchange="document.getElementById('empAcpUrlWrap').style.display = this.value === 'custom' ? '' : 'none'">
+      <option value="opencode">OpenCode (auto-spawned)</option>
+      <option value="cursor">Cursor Agent (auto-spawned)</option>
+      <option value="custom">Custom URL</option>
+    </select>
+  </div>
+  <div id="empAcpUrlWrap" style="display:none"><label>ACP Server URL</label><input id="empAcpUrl" placeholder="http://localhost:4096"></div>
+  <label>Persona <span style="font-size:9px;color:var(--text3)">(describe roughly, then click Generate)</span></label>
+  <textarea id="empPersona" rows="6" placeholder="e.g. A frontend specialist who loves React and CSS..."></textarea>
+  <div style="margin-top:6px"><button class="btn" id="genPersonaBtn" onclick="generatePersona()">✨ Generate Persona</button></div>
+  <div class="actions"><button class="btn" onclick="hideModal('employeeModal')">Cancel</button><button class="btn primary" onclick="createEmployee()">Create</button></div>
+</div>
+</div>
+
+<!-- Project Modal -->
+<div class="modal-overlay" id="projectModal">
+<div class="modal">
+  <h2>New Project</h2>
+  <label>Name</label><input id="projName">
+  <label>Path</label><input id="projPath" placeholder="/path/to/project">
+  <label>Git Remote</label><input id="projRemote" placeholder="https://github.com/...">
+  <div class="actions"><button class="btn" onclick="hideModal('projectModal')">Cancel</button><button class="btn primary" onclick="createProject()">Create</button></div>
+</div>
+</div>
+
+<!-- Task Modal -->
+<div class="modal-overlay" id="taskModal">
+<div class="modal">
+  <h2>New Task</h2>
+  <label>Title</label><input id="taskTitle">
+  <label>Description</label><textarea id="taskDesc" rows="3"></textarea>
+  <label>Assignee</label><input id="taskAssignee" placeholder="nickname">
+  <label>Project</label><select id="taskProject"><option value="">None</option></select>
+  <div class="actions"><button class="btn" onclick="hideModal('taskModal')">Cancel</button><button class="btn primary" onclick="createTask()">Create</button></div>
+</div>
+</div>
+
+<!-- Task Detail Modal -->
+<div class="modal-overlay" id="taskDetailModal">
+<div class="modal" style="min-width:500px;max-width:700px">
+  <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px">
+    <h2 id="taskDetailTitle" style="flex:1;margin:0"></h2>
+    <span id="taskDetailStatus" style="font-size:10px;padding:2px 8px;border-radius:4px;background:var(--bg3)"></span>
+  </div>
+  <div style="font-size:11px;color:var(--text3);margin-bottom:8px">
+    <span id="taskDetailMeta"></span>
+  </div>
+  <div id="taskDetailDesc" style="font-size:12px;line-height:1.6;color:var(--text2);max-height:400px;overflow-y:auto"></div>
+  <div class="actions"><button class="btn" onclick="hideModal('taskDetailModal')">Close</button></div>
+</div>
+</div>
+
+<script>
+const NICK = 'commander';
+let ws = null;
+let currentChannel = 'general';
+let channels = [];
+let members = [];
+let tasks = [];
+let unread = {};
+
+function connect() {
+  ws = new WebSocket(`${location.protocol.replace('http', 'ws')}//${location.host}/ws?nick=${NICK}`);
+  ws.onopen = () => {
+    document.getElementById('connDot').className = 'status-dot online';
+    loadInitialData();
+  };
+  ws.onclose = () => {
+    document.getElementById('connDot').className = 'status-dot offline';
+    setTimeout(connect, 3000);
+  };
+  ws.onmessage = (e) => {
+    try { handleWS(JSON.parse(e.data)); } catch {}
+  };
+}
+
+function send(msg) { if (ws?.readyState === 1) ws.send(JSON.stringify(msg)); }
+
+function handleWS(msg) {
+  switch (msg.type) {
+    case 'message': {
+      const m = typeof msg.data === 'string' ? JSON.parse(msg.data) : msg.data;
+      if (m.channel === currentChannel) appendMessage(m);
+      else { unread[m.channel] = (unread[m.channel] || 0) + 1; }
+      // Refresh channels in case this is a new channel
+      if (!channels.some(c => c.name === m.channel) && !m.channel.startsWith('dm:')) loadChannels();
+      renderSidebar();
+      break;
+    }
+    case 'dm': {
+      const m = typeof msg.data === 'string' ? JSON.parse(msg.data) : msg.data;
+      if (m.channel === currentChannel) appendMessage(m);
+      else { unread[m.channel] = (unread[m.channel] || 0) + 1; }
+      loadDMChannels();
+      break;
+    }
+    case 'member_joined':
+    case 'member_left':
+      loadMembers(); loadChannels(); loadDMChannels(); loadWorkers(); break;
+    case 'topic_changed':
+      if (msg.channel === currentChannel) document.getElementById('chatTopic').textContent = msg.topic;
+      loadChannels();
+      break;
+    case 'task_created':
+    case 'task_updated':
+      loadTasks(); break;
+    case 'worker_online':
+    case 'worker_offline':
+      loadWorkers(); break;
+    case 'channel_created':
+      loadChannels(); break;
+    case 'project_created':
+      loadProjects(); break;
+    case 'review_created':
+    case 'review_responded':
+      loadReviews(); break;
+  }
+}
+
+async function loadInitialData() {
+  await Promise.all([loadChannels(), loadDMChannels(), loadMembers(), loadMessages(), loadTasks(), loadWorkers(), loadReviews()]);
+}
+
+async function loadChannels() {
+  const res = await fetch('/api/channels');
+  channels = await res.json();
+  renderSidebar();
+}
+
+let channelMembership = {}; // { employeeId: [channelName, ...] }
+
+async function loadChannelMembership() {
+  channelMembership = {};
+  const chList = Array.isArray(channels) ? channels : [];
+  await Promise.all(chList.map(async ch => {
+    const res = await fetch('/api/channels/' + encodeURIComponent(ch.name) + '/members');
+    if (!res.ok) return;
+    const mems = await res.json();
+    (mems || []).forEach(m => {
+      if (!channelMembership[m.id]) channelMembership[m.id] = [];
+      channelMembership[m.id].push(ch.name);
+    });
+  }));
+}
+
+async function loadMembers() {
+  const res = await fetch('/api/employees');
+  const data = await res.json();
+  members = Array.isArray(data) ? data : [];
+  await loadChannelMembership();
+  renderMembers();
+  renderTeam();
+}
+
+let channelHasMore = {};   // { channelName: bool }
+let channelOldestId = {};  // { channelName: messageId }
+let loadingOlder = false;
+
+async function loadMessages() {
+  const ch = currentChannel;
+  const res = await fetch(`/api/messages?channel=${encodeURIComponent(ch)}&limit=10`);
+  const data = await res.json();
+  const msgs = data.messages || data || [];
+  channelHasMore[ch] = data.has_more || false;
+  const el = document.getElementById('chatMessages');
+  el.innerHTML = '';
+  if (channelHasMore[ch]) {
+    el.innerHTML = '<div class="load-more-indicator" id="loadMoreHint" style="text-align:center;padding:8px;font-size:10px;color:var(--text3)">Scroll up for older messages</div>';
+  }
+  msgs.forEach(m => appendMessage(m));
+  el.scrollTop = el.scrollHeight;
+  if (msgs.length) {
+    channelOldestId[ch] = msgs[0].id;
+    send({ type: 'mark_read', channel: ch, id: msgs[msgs.length - 1].id });
+  }
+}
+
+async function loadOlderMessages() {
+  const ch = currentChannel;
+  if (loadingOlder || !channelHasMore[ch]) return;
+  const oldestId = channelOldestId[ch];
+  if (!oldestId) return;
+  loadingOlder = true;
+  const el = document.getElementById('chatMessages');
+  const hint = document.getElementById('loadMoreHint');
+  if (hint) hint.textContent = 'Loading...';
+  const prevScrollHeight = el.scrollHeight;
+  const res = await fetch(`/api/messages?channel=${encodeURIComponent(ch)}&limit=10&before=${oldestId}`);
+  if (ch !== currentChannel) { loadingOlder = false; return; } // #1: race condition guard
+  const data = await res.json();
+  const msgs = data.messages || data || [];
+  channelHasMore[ch] = data.has_more || false;
+  if (msgs.length) {
+    channelOldestId[ch] = msgs[0].id;
+    const frag = document.createDocumentFragment();
+    msgs.forEach(m => {
+      const div = document.createElement('div');
+      div.className = 'chat-msg';
+      const senderClass = m.sender === 'commander' ? ' commander' : '';
+      const time = m.ts ? new Date(m.ts + 'Z').toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '';
+      div.innerHTML = `<span class="sender${senderClass}">${m.sender}</span><span class="time">${time}</span><div class="text">${renderMd(m.text)}</div>`;
+      frag.appendChild(div);
+    });
+    const insertBefore = hint ? hint.nextSibling : el.firstChild;
+    el.insertBefore(frag, insertBefore);
+    el.scrollTop = el.scrollHeight - prevScrollHeight;
+  }
+  if (!channelHasMore[ch]) {
+    if (hint) hint.textContent = msgs.length ? 'Beginning of conversation' : 'No more messages'; // #3: end indicator
+  } else if (hint) {
+    hint.textContent = 'Scroll up for older messages';
+  }
+  loadingOlder = false;
+}
+
+// Scroll-to-top listener for loading older messages
+document.getElementById('chatMessages').addEventListener('scroll', function() {
+  if (this.scrollTop < 50 && channelHasMore[currentChannel] && !loadingOlder) {
+    loadOlderMessages();
+  }
+});
+
+async function loadTasks() {
+  const res = await fetch('/api/tasks');
+  const data = await res.json();
+  tasks = Array.isArray(data) ? data : [];
+  renderBoard();
+}
+
+async function loadWorkers() {
+  const res = await fetch('/api/workers');
+  const data = await res.json();
+  const workers = Array.isArray(data) ? data : [];
+  renderWorkers(workers);
+}
+
+let dmChannels = [];
+
+async function loadDMChannels() {
+  const res = await fetch('/api/dm-channels');
+  const data = await res.json();
+  dmChannels = Array.isArray(data) ? data : [];
+  renderSidebar();
+}
+
+function renderSidebar() {
+  // Channels
+  const cl = document.getElementById('channelList');
+  cl.innerHTML = channels.map(c => {
+    const active = c.name === currentChannel ? ' active' : '';
+    const badge = unread[c.name] ? `<span class="badge">${unread[c.name]}</span>` : '';
+    return `<div class="sidebar-item${active}" onclick="switchChannel('${c.name}')">#${c.name}${badge}</div>`;
+  }).join('');
+
+  // DMs — commander's on top, then others
+  const dl = document.getElementById('dmList');
+  const myDMs = dmChannels.filter(d => d.channel.includes(NICK));
+  const otherDMs = dmChannels.filter(d => !d.channel.includes(NICK));
+  const allDMs = [...myDMs, ...otherDMs];
+
+  dl.innerHTML = allDMs.map(d => {
+    const ch = d.channel;
+    const parts = ch.replace('dm:', '').split(':');
+    const isMine = parts.includes(NICK);
+    const other = parts.filter(n => n !== NICK).join(', ') || parts.join(' ↔ ');
+    const label = isMine ? other : `${parts[0]} ↔ ${parts[1]}`;
+    const active = ch === currentChannel ? ' active' : '';
+    const badge = unread[ch] ? `<span class="badge">${unread[ch]}</span>` : '';
+    const dimStyle = isMine ? '' : ' style="opacity:0.5"';
+    return `<div class="sidebar-item${active}"${dimStyle} onclick="switchChannel('${ch}')">${label}${badge}</div>`;
+  }).join('') || '<div style="font-size:10px;color:var(--text3);padding:4px 8px">No DMs yet</div>';
+}
+
+let lastWorkers = [];
+
+function renderMembers() {
+  const el = document.getElementById('memberList');
+  el.innerHTML = (members || []).map(m => {
+    const hasWorker = lastWorkers.some(w => w.employee_id === m.id && (w.status === 'online' || w.status === 'busy'));
+    const dot = hasWorker ? 'online' : 'offline';
+    const isWorker = m.role !== 'commander' && m.role !== 'ceo';
+    const dimStyle = isWorker && !m.employed ? 'opacity:0.4;' : '';
+    const clickable = m.role !== 'commander' ? `onclick="showMemberPopover(event, ${m.id}, '${m.nickname}')" style="cursor:pointer;${dimStyle}"` : '';
+    return `<div class="sidebar-item" ${clickable}><span class="status-dot ${dot}"></span>${m.nickname} <span style="color:var(--text3);font-size:10px">${m.role}</span></div>`;
+  }).join('');
+  renderChannelMembers();
+}
+
+let rpTab = 'members';
+
+function switchRPTab(tab) {
+  rpTab = tab;
+  document.getElementById('rpTabMembers').classList.toggle('active', tab === 'members');
+  document.getElementById('rpTabTeam').classList.toggle('active', tab === 'team');
+  document.getElementById('memberListChannel').style.display = tab === 'members' ? '' : 'none';
+  document.getElementById('memberList').style.display = tab === 'team' ? '' : 'none';
+  if (tab === 'members') renderChannelMembers();
+}
+
+function renderChannelMembers() {
+  const el = document.getElementById('memberListChannel');
+  if (!el) return;
+  const channelName = currentChannel;
+  if (!channelName || channelName.startsWith('dm:')) {
+    el.innerHTML = '<div style="font-size:10px;color:var(--text3);padding:8px">Select a channel to see members.</div>';
+    return;
+  }
+  // Use channelMembership to find members of current channel
+  const channelMembers = (members || []).filter(m => (channelMembership[m.id] || []).includes(channelName));
+  if (!channelMembers.length) {
+    el.innerHTML = '<div style="font-size:10px;color:var(--text3);padding:8px">No members in #' + escHtml(channelName) + '</div>';
+    return;
+  }
+  el.innerHTML = channelMembers.map(m => {
+    const hasWorker = lastWorkers.some(w => w.employee_id === m.id && (w.status === 'online' || w.status === 'busy'));
+    const dot = hasWorker ? 'online' : 'offline';
+    const clickable = m.role !== 'commander' ? `onclick="showMemberPopover(event, ${m.id}, '${m.nickname}')" style="cursor:pointer"` : '';
+    return `<div class="sidebar-item" ${clickable}><span class="status-dot ${dot}"></span>${m.nickname} <span style="color:var(--text3);font-size:10px">${m.role}</span></div>`;
+  }).join('');
+}
+
+// ── Member popover ──
+
+let popoverTarget = { id: 0, nick: '' };
+
+function showMemberPopover(e, empId, nick) {
+  e.stopPropagation();
+  popoverTarget = { id: empId, nick };
+  const pop = document.getElementById('memberPopover');
+  const worker = lastWorkers.find(w => w.employee_id === empId && w.status !== 'offline');
+  // Show/hide contextual items
+  document.getElementById('popLogs').classList.toggle('disabled', !worker?.log_path);
+  document.getElementById('popKill').classList.toggle('disabled', !worker);
+  document.getElementById('popSpawn').classList.toggle('disabled', !!worker);
+  pop.style.left = e.clientX + 'px';
+  pop.style.top = e.clientY + 'px';
+  pop.classList.add('active');
+}
+
+document.addEventListener('click', () => document.getElementById('memberPopover').classList.remove('active'));
+
+function popoverDM() {
+  document.getElementById('memberPopover').classList.remove('active');
+  const dmCh = [NICK, popoverTarget.nick].sort().join(':');
+  switchChannel('dm:' + dmCh);
+  switchView('chat');
+}
+
+function popoverLogs() {
+  document.getElementById('memberPopover').classList.remove('active');
+  const worker = lastWorkers.find(w => w.employee_id === popoverTarget.id && w.status !== 'offline');
+  if (worker) openLogViewer(worker.id, popoverTarget.nick);
+}
+
+async function popoverSpawn() {
+  document.getElementById('memberPopover').classList.remove('active');
+  await spawnWorker(popoverTarget.id);
+}
+
+async function popoverKill() {
+  document.getElementById('memberPopover').classList.remove('active');
+  const worker = lastWorkers.find(w => w.employee_id === popoverTarget.id && w.status !== 'offline');
+  if (worker) await killWorker(worker.id, popoverTarget.nick);
+}
+
+async function spawnWorker(employeeId) {
+  const res = await fetch('/api/workers/spawn', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ employee_id: employeeId }),
+  });
+  const data = await res.json();
+  if (res.ok) {
+    loadWorkers();
+  } else {
+    alert('Spawn failed: ' + (data.error || 'unknown error'));
+  }
+}
+
+function renderWorkers(workers) {
+  lastWorkers = workers || [];
+  renderMembers(); // refresh online dots
+
+  const el = document.getElementById('workersView');
+  if (!el) return;
+  if (!workers?.length) {
+    el.innerHTML = '<div style="color:var(--text3);font-size:12px;padding:12px">No workers. Spawn one from the Team sidebar or Team tab.</div>';
+    return;
+  }
+  el.innerHTML = workers.map(w => {
+    const emp = members.find(m => m.id === w.employee_id);
+    const nick = emp?.nickname || `employee#${w.employee_id}`;
+    const isAlive = w.status === 'online' || w.status === 'busy';
+    const statusClass = isAlive ? 'online' : 'offline';
+    const logsBtn = w.log_path ? `<button class="btn" onclick="openLogViewer(${w.id},'${nick}')">📄 Logs</button>` : '';
+    const killBtn = isAlive ? `<button class="btn" style="border-color:var(--red);color:var(--red)" onclick="killWorker(${w.id},'${nick}')">⏹ Kill</button>` : '';
+    const spawnBtn = !isAlive ? `<button class="btn" style="border-color:var(--green);color:var(--green)" onclick="spawnWorker(${w.employee_id})">▶ Respawn</button>` : '';
+    const empEmployed = emp?.employed;
+    const employedBadge = emp && emp.role !== 'commander' && emp.role !== 'ceo'
+      ? `<span class="emp-badge ${empEmployed ? 'employed' : 'not-employed'}" style="font-size:9px">${empEmployed ? 'Employed' : 'Not Employed'}</span>`
+      : '';
+    return `<div class="wk-card">
+      <div class="wk-header">
+        <span class="status-dot ${statusClass}"></span>
+        <span class="wk-nick">${nick}</span>
+        ${employedBadge}
+        <span class="wk-status ${statusClass}">${w.status}</span>
+      </div>
+      <div class="wk-meta">PID ${w.pid} · Worker #${w.id}</div>
+      <div class="wk-actions">${logsBtn}${killBtn}${spawnBtn}</div>
+    </div>`;
+  }).join('');
+}
+
+async function killWorker(workerId, nick) {
+  if (!confirm(`Kill worker for ${nick}?`)) return;
+  await fetch(`/api/workers/${workerId}/kill`, { method: 'POST' });
+  loadWorkers();
+}
+
+let logEventSource = null;
+
+function toolBadgeClass(name) {
+  if (/^(Bash)$/i.test(name)) return 'tool-bash';
+  if (/^(Read|Edit|Write|NotebookEdit)$/i.test(name)) return 'tool-file';
+  if (/^(Grep|Glob)$/i.test(name)) return 'tool-search';
+  if (/^(WebFetch|WebSearch)$/i.test(name)) return 'tool-web';
+  if (/^(Agent|Task|SendMessage|ToolSearch)$/i.test(name)) return 'tool-other';
+  if (name.startsWith('mcp__')) return 'tool-mcp';
+  return 'tool-other';
+}
+
+function formatToolDetail(name, input) {
+  if (!input || typeof input !== 'object') return '';
+  if (name === 'Bash') return input.command ? '$ ' + truncStr(input.command, 150) : '';
+  if (/^(Read|Edit|Write)$/.test(name)) return input.file_path ? shortPath(input.file_path) : '';
+  if (name === 'Grep') return input.pattern ? truncStr(input.pattern, 100) : '';
+  if (name === 'Glob') return input.pattern || '';
+  if (name === 'WebFetch') return input.url ? truncStr(input.url, 120) : '';
+  if (name === 'WebSearch') return input.query ? truncStr(input.query, 100) : '';
+  if (name === 'Agent') return input.description || input.prompt ? truncStr(input.description || input.prompt, 100) : '';
+  if (name.startsWith('mcp__')) {
+    const short = name.split('__').pop();
+    return short + (input.message ? ': ' + truncStr(input.message, 80) : '');
+  }
+  return '';
+}
+
+function truncStr(s, max) { return s.length <= max ? s : s.slice(0, max) + '…'; }
+function shortPath(p) {
+  const home = '/home/';
+  if (p.includes(home)) { const i = p.indexOf('/', p.indexOf(home) + home.length); return '~' + p.slice(i); }
+  return p;
+}
+
+function renderLogLine(raw) {
+  const div = document.createElement('div');
+  div.className = 'log-line';
+
+  // Try JSON first
+  if (raw.startsWith('{')) {
+    try {
+      const msg = JSON.parse(raw);
+      return renderJsonLog(div, msg);
+    } catch {}
+  }
+
+  // slog line: "2026/03/26 23:20:49 INFO ..."
+  const slogMatch = raw.match(/^(\d{4}\/\d{2}\/\d{2} \d{2}:\d{2}:\d{2}) (INFO|WARN|ERROR|DEBUG) (.+)$/);
+  if (slogMatch) {
+    div.className = 'log-line log-slog';
+    const [, ts, level, rest] = slogMatch;
+    const lvlClass = 'lvl-' + level.toLowerCase();
+    div.innerHTML = `<span style="color:var(--text3)">${ts}</span> <span class="${lvlClass}">${level}</span> ${escHtml(rest)}`;
+    return div;
+  }
+
+  // Fallback: raw text
+  div.className = 'log-line log-slog';
+  div.textContent = raw;
+  return div;
+}
+
+function renderJsonLog(div, msg) {
+  const type = msg.type;
+
+  if (type === 'system') {
+    div.className = 'log-line log-system';
+    if (msg.subtype === 'init') {
+      div.textContent = `⚡ session started · model: ${msg.model} · tools: ${(msg.tools||[]).length} · mcp: ${(msg.mcp_servers||[]).map(s=>s.name).join(', ')}`;
+    } else {
+      div.textContent = `[system] ${msg.subtype || ''}`;
+    }
+    return div;
+  }
+
+  if (type === 'assistant') {
+    const content = msg.message?.content;
+    if (!Array.isArray(content)) return null;
+
+    const frag = document.createDocumentFragment();
+    for (const block of content) {
+      if (block.type === 'text' && block.text) {
+        const el = document.createElement('div');
+        el.className = 'log-line log-text';
+        el.textContent = block.text;
+        frag.appendChild(el);
+      } else if (block.type === 'tool_use') {
+        const el = document.createElement('div');
+        el.className = 'log-line log-tool';
+        const badge = toolBadgeClass(block.name);
+        const detail = formatToolDetail(block.name, block.input);
+        el.innerHTML = `<span class="tool-badge ${badge}">${escHtml(block.name)}</span><span class="tool-detail">${escHtml(detail)}</span>`;
+        frag.appendChild(el);
+      }
+    }
+    if (frag.childNodes.length === 0) return null;
+    // Return a wrapper
+    const wrapper = document.createElement('div');
+    wrapper.appendChild(frag);
+    return wrapper;
+  }
+
+  if (type === 'result') {
+    div.className = 'log-line log-result';
+    const cost = msg.usage ? ` · ${(msg.usage.input_tokens||0).toLocaleString()} in / ${(msg.usage.output_tokens||0).toLocaleString()} out` : '';
+    div.textContent = `✓ completed${cost}`;
+    return div;
+  }
+
+  if (type === 'error') {
+    div.className = 'log-line log-error';
+    const errMsg = typeof msg.error === 'object' ? msg.error.message : msg.error;
+    div.textContent = `✗ ${errMsg}`;
+    return div;
+  }
+
+  // Skip noisy types
+  if (type === 'tool_result' || type === 'user' || type === 'keep_alive') return null;
+
+  // ACP transcript JSONL format
+  if (msg.direction && msg.method) {
+    const arrow = msg.direction === 'out' ? '→' : '←';
+    const div2 = document.createElement('div');
+    div2.className = 'log-line log-text';
+    div2.style.whiteSpace = 'pre-wrap';
+    div2.style.wordBreak = 'break-word';
+    const params = msg.params ? JSON.stringify(msg.params, null, 2) : msg.result ? JSON.stringify(msg.result, null, 2) : '';
+    div2.textContent = `${arrow} ${msg.type} ${msg.method}${params ? '\n' + params : ''}`;
+    return div2;
+  }
+
+  // Fallback for unknown JSON
+  div.className = 'log-line log-slog';
+  div.style.whiteSpace = 'pre-wrap';
+  div.style.wordBreak = 'break-word';
+  div.textContent = `[${type || 'unknown'}] ${JSON.stringify(msg, null, 2)}`;
+  return div;
+}
+
+let currentLogWorkerId = 0;
+let currentLogWorkerNick = '';
+let logSSE = null;
+let transcriptSSE = null;
+let ttySSE = null;
+let xtermInstance = null;
+let currentLogTab = 'logs';
+
+function openLogViewer(workerId, nick) {
+  currentLogWorkerId = workerId;
+  currentLogWorkerNick = nick;
+  document.getElementById('logTitle').textContent = `${nick} #${workerId}`;
+  document.getElementById('workerMsgInput').placeholder = `Send to ${nick}'s channel... (Enter)`;
+  // Hide TTY tab for ACP workers (no PTY)
+  const emp = members.find(m => m.nickname === nick);
+  const ttyTab = document.querySelector('.log-tab[data-logtab="tty"]');
+  if (ttyTab) ttyTab.style.display = emp?.harness === 'acp' ? 'none' : '';
+  document.getElementById('logOverlay').classList.add('active');
+  switchLogTab('logs');
+}
+
+function switchLogTab(tab) {
+  currentLogTab = tab;
+  document.querySelectorAll('.log-tab[data-logtab]').forEach(t => t.classList.toggle('active', t.dataset.logtab === tab));
+  document.getElementById('logContent').style.display = tab === 'logs' ? '' : 'none';
+  document.getElementById('transcriptContent').style.display = tab === 'transcript' ? '' : 'none';
+  document.getElementById('ttyContainer').style.display = tab === 'tty' ? '' : 'none';
+
+  // Stop all streams
+  if (logSSE) { logSSE.close(); logSSE = null; }
+  if (transcriptSSE) { transcriptSSE.close(); transcriptSSE = null; }
+  if (ttySSE) { ttySSE.close(); ttySSE = null; }
+
+  if (tab === 'logs') startLogStream();
+  if (tab === 'transcript') startTranscriptStream();
+  if (tab === 'tty') startTTY();
+}
+
+function autoScrollStream(el, sse) {
+  let auto = true;
+  el.addEventListener('scroll', () => {
+    auto = el.scrollTop + el.clientHeight >= el.scrollHeight - 30;
+  });
+  sse.onmessage = (e) => {
+    const node = renderLogLine(e.data);
+    if (node) {
+      el.appendChild(node);
+      if (auto) el.scrollTop = el.scrollHeight;
+    }
+  };
+}
+
+function startLogStream() {
+  const el = document.getElementById('logContent');
+  el.innerHTML = '';
+  logSSE = new EventSource(`/api/workers/${currentLogWorkerId}/logs`);
+  autoScrollStream(el, logSSE);
+  logSSE.onerror = () => { logSSE?.close(); logSSE = null; };
+}
+
+function startTranscriptStream() {
+  const el = document.getElementById('transcriptContent');
+  el.innerHTML = '';
+  transcriptSSE = new EventSource(`/api/workers/${currentLogWorkerId}/transcript`);
+  autoScrollStream(el, transcriptSSE);
+  transcriptSSE.onerror = () => {
+    const d = document.createElement('div');
+    d.className = 'log-line log-slog';
+    d.textContent = '— transcript not available yet —';
+    el.appendChild(d);
+    transcriptSSE?.close(); transcriptSSE = null;
+  };
+}
+
+function startTTY() {
+  const container = document.getElementById('ttyContainer');
+  container.innerHTML = '';
+
+  if (xtermInstance) { xtermInstance.dispose(); xtermInstance = null; }
+
+  if (typeof Terminal === 'undefined') {
+    container.innerHTML = '<div style="color:var(--text3);padding:12px;font-size:12px">xterm.js not loaded</div>';
+    return;
+  }
+
+  const term = new Terminal({
+    theme: { background: '#0d1117', foreground: '#e6edf3', cursor: '#58a6ff', selectionBackground: '#264f78' },
+    fontSize: 12,
+    fontFamily: "'SF Mono', 'Fira Code', 'Cascadia Code', monospace",
+    scrollback: 10000,
+    convertEol: false,
+  });
+  term.open(container);
+  xtermInstance = term;
+
+  // Auto-scroll tracking: scroll to bottom unless user scrolled up
+  let ttyAutoScroll = true;
+  const viewport = container.querySelector('.xterm-viewport');
+  if (viewport) {
+    viewport.addEventListener('scroll', () => {
+      const atBottom = viewport.scrollTop + viewport.clientHeight >= viewport.scrollHeight - 20;
+      ttyAutoScroll = atBottom;
+    });
+  }
+
+  // Stream raw PTY output (base64-encoded) via /api/workers/:id/tty
+  ttySSE = new EventSource(`/api/workers/${currentLogWorkerId}/tty`);
+  ttySSE.onmessage = (e) => {
+    const binary = atob(e.data);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    term.write(bytes, () => {
+      if (ttyAutoScroll) term.scrollToBottom();
+    });
+  };
+  ttySSE.onerror = () => { ttySSE?.close(); ttySSE = null; };
+
+  // Forward keystrokes from xterm.js → WebSocket → worker PTY
+  term.onData((data) => {
+    if (currentLogWorkerNick) {
+      send({ type: 'worker_tty_input', to: currentLogWorkerNick, text: data });
+    }
+  });
+
+  // Sync terminal size to PTY
+  const sendResize = () => {
+    if (currentLogWorkerNick) {
+      send({ type: 'worker_tty_resize', to: currentLogWorkerNick, text: `${term.cols}x${term.rows}` });
+    }
+  };
+  term.onResize(sendResize);
+  // Send initial size after a tick (once xterm has measured the container)
+  setTimeout(sendResize, 100);
+}
+
+function closeLogViewer() {
+  document.getElementById('logOverlay').classList.remove('active');
+  if (logSSE) { logSSE.close(); logSSE = null; }
+  if (transcriptSSE) { transcriptSSE.close(); transcriptSSE = null; }
+  if (ttySSE) { ttySSE.close(); ttySSE = null; }
+  if (xtermInstance) { xtermInstance.dispose(); xtermInstance = null; }
+  currentLogWorkerNick = '';
+  currentLogWorkerId = 0;
+}
+
+function sendWorkerMessage() {
+  const input = document.getElementById('workerMsgInput');
+  const text = input.value.trim();
+  if (!text || !currentLogWorkerNick) return;
+  send({ type: 'worker_notify', to: currentLogWorkerNick, text });
+  input.value = '';
+}
+
+function sendWorkerCommand(command) {
+  if (!currentLogWorkerNick) return;
+  send({ type: 'worker_command', to: currentLogWorkerNick, text: command });
+}
+
+document.addEventListener('keydown', (e) => {
+  if (e.target.id === 'workerMsgInput' && e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    sendWorkerMessage();
+  }
+});
+
+function renderBoard() {
+  document.querySelectorAll('.board-col .tasks').forEach(col => {
+    const status = col.dataset.status;
+    const filtered = (tasks || []).filter(t => t.status === status);
+    col.innerHTML = filtered.map(t => `<div class="task-card" onclick="showTaskDetail(${t.id})"><div class="title">#${t.id} ${escHtml(t.title)}</div><div class="meta">${t.assignee || 'unassigned'}</div></div>`).join('');
+  });
+}
+
+async function showTaskDetail(id) {
+  const res = await fetch('/api/tasks/' + id);
+  if (!res.ok) return;
+  const data = await res.json();
+  // Could be {task, project} or just the task
+  const t = data.task || data;
+  const proj = data.project;
+  document.getElementById('taskDetailTitle').textContent = '#' + t.id + ' ' + t.title;
+  document.getElementById('taskDetailStatus').textContent = t.status;
+  const meta = ['Assignee: ' + (t.assignee || 'unassigned'), 'Created by: ' + t.created_by, 'Updated: ' + t.updated_at];
+  if (proj) meta.push('Project: ' + proj.name + (proj.path ? ' (' + proj.path + ')' : ''));
+  document.getElementById('taskDetailMeta').textContent = meta.join(' · ');
+  document.getElementById('taskDetailDesc').innerHTML = t.description ? renderMd(t.description) : '<span style="color:var(--text3)">(no description)</span>';
+  showModal('taskDetailModal');
+}
+
+function appendMessage(m) {
+  const el = document.getElementById('chatMessages');
+  const senderClass = m.sender === 'commander' ? ' commander' : '';
+  const time = m.ts ? new Date(m.ts + 'Z').toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '';
+  el.innerHTML += `<div class="chat-msg"><span class="sender${senderClass}">${m.sender}</span><span class="time">${time}</span><div class="text">${renderMd(m.text)}</div></div>`;
+  el.scrollTop = el.scrollHeight;
+}
+
+function escHtml(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+
+function renderMd(text) {
+  let s = escHtml(text);
+  // Code blocks: ```...```
+  s = s.replace(/```(\w*)\n([\s\S]*?)```/g, '<pre style="background:var(--bg3);padding:6px 8px;border-radius:4px;margin:4px 0;font-size:11px;white-space:pre-wrap;word-break:break-word"><code>$2</code></pre>');
+  // Inline code: `...`
+  s = s.replace(/`([^`]+)`/g, '<code style="background:var(--bg3);padding:1px 4px;border-radius:3px;font-size:11px">$1</code>');
+  // Bold: **...**
+  s = s.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+  // Italic: *...*
+  s = s.replace(/\*(.+?)\*/g, '<em>$1</em>');
+  // Images: ![alt](path) — serve via /api/files
+  s = s.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, (m, alt, path) => {
+    const src = path.startsWith('http') ? path : '/api/files?path=' + encodeURIComponent(path);
+    return `<img src="${src}" alt="${alt}" style="max-width:100%;border-radius:4px;margin:4px 0">`;
+  });
+  // Links: [text](url)
+  s = s.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" style="color:var(--accent)">$1</a>');
+  // Line breaks
+  s = s.replace(/\n/g, '<br>');
+  return s;
+}
+
+function switchChannel(name) {
+  currentChannel = name;
+  delete unread[name];
+  document.getElementById('chatTitle').textContent = name.startsWith('dm:') ? `DM: ${name.replace('dm:', '').replace(':', ' ↔ ')}` : `#${name}`;
+  // Show topic for regular channels
+  const ch = channels.find(c => c.name === name);
+  document.getElementById('chatTopic').textContent = ch?.topic || '';
+  loadMessages();
+  renderSidebar();
+  renderChannelMembers();
+}
+
+function switchView(view) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.view === view));
+  ['chatView','boardView','projectsView','teamView','workersView','reviewsView','settingsView'].forEach(id => {
+    document.getElementById(id).classList.toggle('active', id === view + 'View');
+  });
+  if (view === 'board') loadTasks();
+  if (view === 'projects') { loadProjects(); loadTasks(); }
+  if (view === 'team') loadMembers();
+  if (view === 'workers') loadWorkers();
+  if (view === 'reviews') loadReviews();
+  if (view === 'settings') loadSettings();
+}
+
+let projects = [];
+
+function renderProjects() {
+  const el = document.getElementById('projectsView');
+  if (!projects.length) {
+    el.innerHTML = '<div style="color:var(--text3);font-size:12px;padding:12px">No projects yet. Click "+ Project" to add one.</div>';
+    return;
+  }
+  el.innerHTML = projects.map(p => {
+    const projTasks = (tasks || []).filter(t => t.project_id === p.id);
+    const byStatus = s => projTasks.filter(t => t.status === s);
+    const counts = ['backlog','todo','in_progress','in_qa','done'].map(s => {
+      const c = byStatus(s).length;
+      return c ? `<span style="color:var(--text3)">${s.replace('_',' ')}: ${c}</span>` : '';
+    }).filter(Boolean).join(' · ');
+
+    const taskCards = projTasks.slice(0, 10).map(t => {
+      const statusColors = { backlog: 'var(--text3)', todo: 'var(--accent)', in_progress: 'var(--yellow)', in_qa: 'var(--green)', done: 'var(--green)' };
+      const dot = `<span style="color:${statusColors[t.status] || 'var(--text3)'}">●</span>`;
+      return `<div class="task-card">${dot} <span class="title">#${t.id} ${escHtml(t.title)}</span><div class="meta">${t.assignee || 'unassigned'} · ${t.status.replace('_',' ')}</div></div>`;
+    }).join('');
+
+    const more = projTasks.length > 10 ? `<div style="font-size:10px;color:var(--text3);padding:4px">+${projTasks.length - 10} more</div>` : '';
+
+    return `<div class="project-card">
+      <div class="project-header">
+        <h3>${escHtml(p.name)}</h3>
+        ${p.path ? `<div class="path">${escHtml(p.path)}</div>` : ''}
+        ${p.git_remote ? `<div class="remote">${escHtml(p.git_remote)}</div>` : ''}
+      </div>
+      <div class="project-tasks">${taskCards || '<div style="font-size:10px;color:var(--text3)">No tasks</div>'}${more}</div>
+      <div class="project-footer"><span>${counts || 'No tasks'}</span><button class="btn" onclick="deleteProject(${p.id})">Delete</button></div>
+    </div>`;
+  }).join('');
+}
+
+async function deleteProject(id) {
+  if (!confirm('Delete this project? Tasks will keep their project_id but the project will be gone.')) return;
+  await fetch('/api/projects/' + id, { method: 'DELETE' });
+  loadProjects();
+}
+
+// Chat input
+document.getElementById('chatInput').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && e.shiftKey) {
+    e.preventDefault();
+    const text = e.target.value.trim();
+    if (!text) return;
+    if (currentChannel.startsWith('dm:')) {
+      const parts = currentChannel.replace('dm:', '').split(':');
+      const to = parts.find(n => n !== NICK) || parts[0];
+      send({ type: 'chat_dm', to, text });
+    } else {
+      send({ type: 'chat_send', channel: currentChannel, text });
+    }
+    e.target.value = '';
+  }
+});
+
+// Modals
+function showModal(id) { document.getElementById(id).classList.add('active'); }
+function hideModal(id) { document.getElementById(id).classList.remove('active'); }
+document.querySelectorAll('.modal-overlay').forEach(el => {
+  el.addEventListener('click', (e) => { if (e.target === el) el.classList.remove('active'); });
+});
+
+async function openEmployeeModal() {
+  showModal('employeeModal');
+  suggestName();
+  document.getElementById('empHarness').onchange = () => {
+    const harness = document.getElementById('empHarness').value;
+    const isAcp = harness === 'acp';
+    document.getElementById('empAcpProviderWrap').style.display = isAcp ? '' : 'none';
+    if (!isAcp) document.getElementById('empAcpUrlWrap').style.display = 'none';
+    const modelEl = document.getElementById('empModel');
+    if (harness === 'codex' && modelEl.value === 'opus') modelEl.value = 'gpt-5.4';
+    else if (harness !== 'codex' && modelEl.value === 'gpt-5.4') modelEl.value = 'opus';
+  };
+}
+
+async function suggestName() {
+  const res = await fetch('/api/employees/suggest-name');
+  const data = await res.json();
+  if (data.name) document.getElementById('empNick').value = data.name;
+}
+
+async function generatePersona() {
+  const name = document.getElementById('empNick').value.trim();
+  const desc = document.getElementById('empPersona').value.trim();
+  if (!name) { alert('Set a nickname first'); return; }
+  if (!desc) { alert('Write a rough description first'); return; }
+  const btn = document.getElementById('genPersonaBtn');
+  btn.textContent = '⏳ Generating...';
+  btn.disabled = true;
+  try {
+    const res = await fetch('/api/employees/generate-persona', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, description: desc }),
+    });
+    const data = await res.json();
+    if (data.persona) document.getElementById('empPersona').value = data.persona;
+    else if (data.error) alert('Error: ' + data.error);
+  } finally {
+    btn.textContent = '✨ Generate Persona';
+    btn.disabled = false;
+  }
+}
+
+async function createEmployee() {
+  const body = {
+    nickname: document.getElementById('empNick').value.trim(),
+    role: document.getElementById('empRole').value,
+    email: document.getElementById('empEmail').value.trim(),
+    persona: document.getElementById('empPersona').value.trim(),
+    harness: document.getElementById('empHarness').value,
+    model: document.getElementById('empModel').value.trim() || 'opus',
+    acp_provider: document.getElementById('empAcpProvider').value === 'custom' ? '' : document.getElementById('empAcpProvider').value,
+    acp_url: document.getElementById('empAcpProvider').value === 'custom' ? document.getElementById('empAcpUrl').value.trim() : '',
+  };
+  if (!body.nickname) return;
+  const res = await fetch('/api/employees', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  if (!res.ok) {
+    const data = await res.json();
+    alert(data.error || 'Failed to create employee');
+    return;
+  }
+  hideModal('employeeModal');
+  document.getElementById('empNick').value = '';
+  document.getElementById('empPersona').value = '';
+  document.getElementById('empEmail').value = '';
+  document.getElementById('empHarness').value = 'claude';
+  document.getElementById('empModel').value = 'opus';
+  document.getElementById('empAcpProvider').value = 'opencode';
+  document.getElementById('empAcpProviderWrap').style.display = 'none';
+  document.getElementById('empAcpUrl').value = '';
+  document.getElementById('empAcpUrlWrap').style.display = 'none';
+  loadMembers();
+}
+
+async function createProject() {
+  const body = {
+    name: document.getElementById('projName').value.trim(),
+    path: document.getElementById('projPath').value.trim(),
+    git_remote: document.getElementById('projRemote').value.trim(),
+  };
+  if (!body.name) return;
+  await fetch('/api/projects', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  hideModal('projectModal');
+  loadProjects();
+}
+
+async function createTask() {
+  const projVal = document.getElementById('taskProject').value;
+  const body = {
+    title: document.getElementById('taskTitle').value.trim(),
+    description: document.getElementById('taskDesc').value.trim(),
+    assignee: document.getElementById('taskAssignee').value.trim(),
+    project_id: projVal ? parseInt(projVal) : 0,
+    created_by: NICK,
+  };
+  if (!body.title) return;
+  await fetch('/api/tasks', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  hideModal('taskModal');
+  loadTasks();
+}
+
+async function loadProjects() {
+  const res = await fetch('/api/projects');
+  const data = await res.json();
+  projects = Array.isArray(data) ? data : [];
+  const sel = document.getElementById('taskProject');
+  sel.innerHTML = '<option value="">None</option>' + projects.map(p => `<option value="${p.id}">${p.name}</option>`).join('');
+  renderProjects();
+}
+
+// ── Team View ──
+
+function renderTeam() {
+  const el = document.getElementById('teamView');
+  if (!el) return;
+  if (!members.length) {
+    el.innerHTML = '<div style="color:var(--text3);font-size:12px;padding:12px">No employees yet.</div>';
+    return;
+  }
+  el.innerHTML = members.map(m => {
+    const roleColor = m.role === 'commander' ? 'var(--yellow)' : m.role === 'ceo' ? 'var(--accent)' : 'var(--text2)';
+    const isWorker = m.role !== 'commander' && m.role !== 'ceo';
+    const employedBadge = isWorker
+      ? `<span class="emp-badge ${m.employed ? 'employed' : 'not-employed'}">${m.employed ? 'Employed' : 'Not Employed'}</span>`
+      : '';
+    const employedToggle = isWorker
+      ? `<button class="emp-toggle" onclick="toggleEmployed(${m.id}, ${m.employed ? 0 : 1})">${m.employed ? 'Release' : 'Employ'}</button>`
+      : '';
+    return `<div class="emp-card" id="emp-card-${m.id}">
+      <div class="emp-header">
+        <span class="emp-id">#${m.id}</span>
+        <span class="emp-nick">${escHtml(m.nickname)}</span>
+        ${employedBadge}
+        <span class="emp-harness">${escHtml(m.harness)}</span>
+        <span class="emp-model">${escHtml(m.model)}</span>
+        <span class="emp-role" style="color:${roleColor}">${m.role}</span>
+      </div>
+      <div class="emp-body">
+        <label style="font-size:10px;color:var(--text3);margin-bottom:4px;display:block">Persona</label>
+        <textarea id="persona-${m.id}" onchange="markPersonaDirty(${m.id})">${escHtml(m.persona)}</textarea>
+        ${m.email ? `<div style="font-size:10px;color:var(--text3);margin-top:4px">${escHtml(m.email)}</div>` : ''}
+        <div class="emp-config">
+          <div><label>Harness</label><select id="harness-${m.id}" onchange="onHarnessChange(${m.id}); markPersonaDirty(${m.id})">
+            <option value="claude"${m.harness === 'claude' ? ' selected' : ''}>Claude</option>
+            <option value="codex"${m.harness === 'codex' ? ' selected' : ''}>Codex</option>
+            <option value="acp"${m.harness === 'acp' ? ' selected' : ''}>ACP</option>
+          </select></div>
+          <div><label>Model</label><input id="model-${m.id}" value="${escHtml(m.model)}" onchange="markPersonaDirty(${m.id})"></div>
+          <div id="acp-provider-wrap-${m.id}" style="${m.harness === 'acp' ? '' : 'display:none'}"><label>Provider</label><select id="acp-provider-${m.id}" onchange="onProviderChange(${m.id}); markPersonaDirty(${m.id})">
+            <option value="opencode"${(m.acp_provider || 'opencode') === 'opencode' ? ' selected' : ''}>OpenCode</option>
+            <option value="cursor"${m.acp_provider === 'cursor' ? ' selected' : ''}>Cursor Agent</option>
+            <option value="custom"${m.acp_provider === '' && m.acp_url ? ' selected' : ''}>Custom URL</option>
+          </select></div>
+          <div id="acp-url-wrap-${m.id}" style="${m.harness === 'acp' && m.acp_provider === '' && m.acp_url ? '' : 'display:none'}"><label>ACP URL</label><input id="acp-url-${m.id}" value="${escHtml(m.acp_url || '')}" placeholder="http://localhost:4096" onchange="markPersonaDirty(${m.id})" style="width:140px"></div>
+        </div>
+        ${(channelMembership[m.id] || []).length ? `<div class="emp-channels">${channelMembership[m.id].map(ch => `<span class="emp-ch-tag">#${escHtml(ch)}</span>`).join('')}</div>` : '<div style="font-size:9px;color:var(--text3);margin-top:6px">No channels</div>'}
+      </div>
+      <div class="emp-footer">
+        <span>${m.last_connected ? 'Last seen: ' + new Date(m.last_connected + 'Z').toLocaleString() : 'Never connected'}</span>
+        <div style="display:flex;gap:4px">${employedToggle}<button class="btn primary" id="save-persona-${m.id}" style="display:none" onclick="savePersona(${m.id})">Save</button></div>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function onHarnessChange(id) {
+  const harness = document.getElementById('harness-' + id).value;
+  const isAcp = harness === 'acp';
+  const providerWrap = document.getElementById('acp-provider-wrap-' + id);
+  const urlWrap = document.getElementById('acp-url-wrap-' + id);
+  if (providerWrap) providerWrap.style.display = isAcp ? '' : 'none';
+  if (urlWrap) urlWrap.style.display = isAcp && document.getElementById('acp-provider-' + id)?.value === 'custom' ? '' : 'none';
+  // Swap default model when switching harness
+  const modelEl = document.getElementById('model-' + id);
+  if (modelEl) {
+    if (harness === 'codex' && modelEl.value === 'opus') modelEl.value = 'gpt-5.4';
+    else if (harness !== 'codex' && modelEl.value === 'gpt-5.4') modelEl.value = 'opus';
+  }
+}
+
+function onProviderChange(id) {
+  const provider = document.getElementById('acp-provider-' + id).value;
+  const urlWrap = document.getElementById('acp-url-wrap-' + id);
+  if (urlWrap) urlWrap.style.display = provider === 'custom' ? '' : 'none';
+}
+
+function markPersonaDirty(id) {
+  document.getElementById('save-persona-' + id).style.display = '';
+}
+
+async function savePersona(id) {
+  const textarea = document.getElementById('persona-' + id);
+  const btn = document.getElementById('save-persona-' + id);
+  const persona = textarea.value;
+  const harness = document.getElementById('harness-' + id)?.value;
+  const model = document.getElementById('model-' + id)?.value;
+  const acpProvider = document.getElementById('acp-provider-' + id)?.value;
+  const acpUrl = document.getElementById('acp-url-' + id)?.value;
+  btn.textContent = 'Saving...';
+  const body = { persona };
+  if (harness) body.harness = harness;
+  if (model) body.model = model;
+  if (harness === 'acp') {
+    body.acp_provider = acpProvider === 'custom' ? '' : (acpProvider || 'opencode');
+    body.acp_url = acpProvider === 'custom' ? (acpUrl || '') : '';
+  }
+  const res = await fetch('/api/employees/' + id, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (res.ok) {
+    btn.style.display = 'none';
+    btn.textContent = 'Save';
+    const emp = members.find(m => m.id === id);
+    if (emp) {
+      emp.persona = persona;
+      if (harness) emp.harness = harness;
+      if (model) emp.model = model;
+      if (harness === 'acp') {
+        emp.acp_provider = body.acp_provider;
+        emp.acp_url = body.acp_url;
+      }
+    }
+    renderTeam();
+  } else {
+    btn.textContent = 'Error';
+    setTimeout(() => { btn.textContent = 'Save'; }, 2000);
+  }
+}
+
+async function toggleEmployed(id, value) {
+  const res = await fetch('/api/employees/' + id, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ employed: value }),
+  });
+  if (res.ok) {
+    const emp = members.find(m => m.id === id);
+    if (emp) emp.employed = value;
+    renderTeam();
+    renderMembers();
+    renderWorkers(lastWorkers);
+  } else {
+    alert('Failed to update employed status');
+  }
+}
+
+function editTopic() {
+  if (currentChannel.startsWith('dm:')) return;
+  const current = document.getElementById('chatTopic').textContent || '';
+  const topic = prompt('Set topic for #' + currentChannel + ':', current);
+  if (topic !== null) {
+    send({ type: 'set_topic', channel: currentChannel, topic });
+  }
+}
+
+async function respawnAll() {
+  const res = await fetch('/api/workers/respawn-all', { method: 'POST' });
+  const data = await res.json();
+  if (data.count > 0) {
+    alert(data.message + ': ' + data.spawning.join(', '));
+  } else {
+    alert('All workers are already running.');
+  }
+  loadWorkers();
+}
+
+async function killAll() {
+  if (!confirm('Kill all active workers?')) return;
+  const res = await fetch('/api/workers/kill-all', { method: 'POST' });
+  const data = await res.json();
+  if (data.count > 0) {
+    alert(`Killed ${data.count} worker(s): ${data.killed.join(', ')}`);
+  } else {
+    alert('No active workers to kill.');
+  }
+  loadWorkers();
+}
+
+// ── Reviews ──
+
+let reviews = [];
+
+async function loadReviews() {
+  const res = await fetch('/api/reviews');
+  const data = await res.json();
+  reviews = Array.isArray(data) ? data : [];
+  renderReviews();
+  // Update badge
+  const badge = document.getElementById('reviewBadge');
+  if (reviews.length > 0) {
+    badge.textContent = reviews.length;
+    badge.style.display = '';
+  } else {
+    badge.style.display = 'none';
+  }
+}
+
+function renderReviews() {
+  const el = document.getElementById('reviewsView');
+  if (!el) return;
+  if (!reviews.length) {
+    el.innerHTML = '<div style="color:var(--text3);font-size:12px;padding:12px">No pending reviews.</div>';
+    return;
+  }
+  el.innerHTML = reviews.map(r => {
+    let body;
+    try { body = JSON.parse(r.body); } catch { body = {}; }
+
+    let content = '';
+    if (r.description) content += `<div class="review-desc">${renderMd(r.description)}</div>`;
+
+    if (r.type === 'choice' && body.options) {
+      content += '<div class="review-options">';
+      body.options.forEach((o, i) => {
+        let img = '';
+        if (o.image_path) {
+          const src = o.image_path.startsWith('http') ? o.image_path : '/api/files?path=' + encodeURIComponent(o.image_path);
+          img = `<img src="${src}">`;
+        }
+        content += `<div class="review-option" id="review-opt-${r.id}-${i}" onclick="toggleChoice(${r.id}, ${i})">${img}<span class="opt-label">${escHtml(o.label || o.id || 'Option ' + (i+1))}</span></div>`;
+      });
+      content += '</div>';
+      content += `<div class="review-actions"><button class="btn primary" onclick="submitReviewChoices(${r.id})">Submit selection</button></div>`;
+      content += `<script type="application/json" id="review-options-${r.id}">${JSON.stringify(body.options)}<\/script>`;
+    } else if (r.type === 'approval') {
+      if (body.details) content += `<div class="review-desc">${renderMd(body.details)}</div>`;
+      content += `<div style="margin-top:8px">
+        <textarea id="review-text-${r.id}" rows="2" placeholder="Add a note (optional)..." style="width:100%;background:var(--bg);border:1px solid var(--border);border-radius:4px;padding:6px 8px;color:var(--text);font-size:11px;font-family:inherit;resize:vertical"></textarea>
+        <div style="display:flex;align-items:center;gap:8px;margin-top:4px">
+          <button class="btn primary" onclick="submitReviewApproval(${r.id}, 'approved')">Approve</button>
+          <button class="btn" style="border-color:var(--red);color:var(--red)" onclick="submitReviewApproval(${r.id}, 'rejected')">Reject</button>
+          <label style="font-size:10px;color:var(--text3);display:flex;align-items:center;gap:4px;margin-left:auto;cursor:pointer">
+            <input type="checkbox" id="review-broadcast-${r.id}"> Broadcast to all
+          </label>
+        </div>
+      </div>`;
+    } else if (r.type === 'form' && body.html) {
+      content += `<iframe srcdoc="${escHtml(body.html)}" sandbox="allow-forms allow-scripts" style="width:100%;min-height:200px;border:1px solid var(--border);border-radius:4px;background:#fff" data-review-id="${r.id}"></iframe>`;
+    } else if (r.type === 'info') {
+      if (body.html) content += `<div style="font-size:12px">${body.html}</div>`;
+      content += `<div class="review-actions"><button class="btn" onclick="respondReview(${r.id}, 'acknowledged')">Acknowledge</button></div>`;
+    }
+
+    // Text input + broadcast toggle (approval has its own above)
+    if (r.type !== 'info' && r.type !== 'approval') {
+      content += `<div style="margin-top:8px">
+        <textarea id="review-text-${r.id}" rows="2" placeholder="Add a note (optional)..." style="width:100%;background:var(--bg);border:1px solid var(--border);border-radius:4px;padding:6px 8px;color:var(--text);font-size:11px;font-family:inherit;resize:vertical"></textarea>
+        <div style="display:flex;align-items:center;gap:8px;margin-top:4px">
+          <button class="btn" style="font-size:10px" onclick="submitReviewText(${r.id})">Send text response</button>
+          <label style="font-size:10px;color:var(--text3);display:flex;align-items:center;gap:4px;margin-left:auto;cursor:pointer">
+            <input type="checkbox" id="review-broadcast-${r.id}"> Broadcast to all
+          </label>
+        </div>
+      </div>`;
+    }
+
+    return `<div class="review-card">
+      <div class="review-header">
+        <h3>${escHtml(r.title)}</h3>
+        <div class="review-from">from ${r.worker_nick} · ${r.type} · ${r.created_at}</div>
+      </div>
+      <div class="review-body">${content}</div>
+    </div>`;
+  }).join('');
+}
+
+function respondReview(id, response) {
+  const resp = typeof response === 'object' ? JSON.stringify(response) : String(response);
+  const broadcast = document.getElementById('review-broadcast-' + id)?.checked || false;
+  ws.send(JSON.stringify({ type: 'review_respond', id: id, text: resp, channel: broadcast ? 'broadcast' : '' }));
+  loadReviews();
+}
+
+const choiceSelections = {}; // reviewId -> Set of indices
+
+function toggleChoice(reviewId, idx) {
+  if (!choiceSelections[reviewId]) choiceSelections[reviewId] = new Set();
+  const set = choiceSelections[reviewId];
+  if (set.has(idx)) set.delete(idx); else set.add(idx);
+  // Update visual
+  const el = document.getElementById(`review-opt-${reviewId}-${idx}`);
+  if (el) el.classList.toggle('selected', set.has(idx));
+}
+
+function submitReviewChoices(reviewId) {
+  const set = choiceSelections[reviewId];
+  if (!set || set.size === 0) { alert('Select at least one option'); return; }
+  const el = document.getElementById('review-options-' + reviewId);
+  if (!el) return;
+  const options = JSON.parse(el.textContent);
+  const chosen = [...set].sort().map(i => options[i]);
+  const note = document.getElementById('review-text-' + reviewId)?.value?.trim();
+  const resp = { choices: chosen };
+  if (note) resp.note = note;
+  respondReview(reviewId, resp);
+  delete choiceSelections[reviewId];
+}
+
+function submitReviewApproval(reviewId, decision) {
+  const note = document.getElementById('review-text-' + reviewId)?.value?.trim();
+  const resp = { decision };
+  if (note) resp.note = note;
+  respondReview(reviewId, resp);
+}
+
+function submitReviewText(reviewId) {
+  const note = document.getElementById('review-text-' + reviewId)?.value?.trim();
+  if (!note) { alert('Enter some text'); return; }
+  respondReview(reviewId, { text: note });
+}
+
+// Listen for form postMessages from sandboxed iframes
+window.addEventListener('message', (e) => {
+  if (e.data?.reviewId && e.data?.response) {
+    respondReview(e.data.reviewId, e.data.response);
+  }
+});
+
+// ── Settings ──
+
+async function loadSettings() {
+  const res = await fetch('/api/settings');
+  const data = await res.json();
+  document.getElementById('settingKnowledgePath').value = data.company_knowledge_path || '';
+}
+
+async function saveSettings() {
+  const knowledgePath = document.getElementById('settingKnowledgePath').value.trim();
+  await fetch('/api/settings', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ company_knowledge_path: knowledgePath }),
+  });
+  alert('Settings saved. New workers will pick up the changes.');
+}
+
+// Init
+connect();
+loadProjects();
+</script>
+</body>
+</html>

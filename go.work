@@ -1,0 +1,7 @@
+go 1.25.1
+
+use (
+	./src/cmd-worker
+	./src/pkg-go-shared
+	./src/svc-artificial
+)

@@ -1,0 +1,11 @@
+bin/
+worker
+*.db
+*.db-wal
+*.db-shm
+*.tty
+*.jsonl
+*.log
+go.work.sum
+.cursor/
+.claude/
