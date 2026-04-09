@@ -694,6 +694,7 @@ func (s *Server) getActiveWorker(employeeID int64) *protocol.Worker {
 }
 
 // isWorkerProcess checks if a PID is a running cmd-worker process.
+// Uses `ps` so it works on both Linux and macOS (no /proc on mac).
 func isWorkerProcess(pid int) bool {
 	// Check if process exists
 	proc, err := os.FindProcess(pid)
@@ -704,12 +705,13 @@ func isWorkerProcess(pid int) bool {
 	if err := proc.Signal(syscall.Signal(0)); err != nil {
 		return false
 	}
-	// Verify it's actually cmd-worker by reading /proc/<pid>/cmdline
-	cmdline, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid))
+	// Verify it's actually cmd-worker via `ps -p <pid> -o command=`
+	// The `command=` form suppresses the header and prints the full command.
+	out, err := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "command=").Output()
 	if err != nil {
 		return false
 	}
-	return strings.Contains(string(cmdline), "cmd-worker")
+	return strings.Contains(string(out), "cmd-worker")
 }
 
 // ── Tasks ───────────────────────────────────────────────────────────────
