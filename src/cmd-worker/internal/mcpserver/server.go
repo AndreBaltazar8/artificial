@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"reflect"
+	"strings"
 
 	"artificial.pt/pkg-go-shared/protocol"
 	"artificial.pt/cmd-worker/internal/hub"
@@ -806,6 +807,13 @@ func (s *Server) registerTools() {
 				assignee = "unassigned"
 			}
 			lines += fmt.Sprintf("#%d [%s] %s → %s\n", t.ID, t.Status, t.Title, assignee)
+			desc := strings.ReplaceAll(t.Description, "\n", " ")
+			if len(desc) > 200 {
+				desc = desc[:200] + fmt.Sprintf("... (truncated, use task_get(%d) for full task)", t.ID)
+			}
+			if desc != "" {
+				lines += "  " + desc + "\n"
+			}
 		}
 		out := fmt.Sprintf("Showing %d of %d task(s):\n%s", len(result.Tasks), result.Total, lines)
 		if result.Total > limit {
