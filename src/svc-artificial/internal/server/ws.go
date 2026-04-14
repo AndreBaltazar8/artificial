@@ -26,18 +26,20 @@ type client struct {
 
 // Hub manages WebSocket connections and message routing.
 type Hub struct {
-	db      *db.DB
-	port    int
-	mu      sync.RWMutex
-	clients map[string]*client // nick → client
+	db          *db.DB
+	port        int
+	mu          sync.RWMutex
+	clients     map[string]*client // nick → client
+	pluginState *pluginStateStore  // aggregated plugin runtime state from worker reports
 }
 
 // NewHub creates a new WebSocket hub.
 func NewHub(database *db.DB, port int) *Hub {
 	return &Hub{
-		db:      database,
-		port:    port,
-		clients: make(map[string]*client),
+		db:          database,
+		port:        port,
+		clients:     make(map[string]*client),
+		pluginState: newPluginStateStore(),
 	}
 }
 
@@ -91,6 +93,7 @@ func (h *Hub) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	h.mu.Lock()
 	delete(h.clients, nick)
 	h.mu.Unlock()
+	h.dropWorkerPluginState(nick)
 
 	// Don't broadcast leave messages — workers disconnect/reconnect on hub
 	// restarts and this just creates noise. The dashboard tracks online status
@@ -176,6 +179,8 @@ func (h *Hub) handleMessage(ctx context.Context, c *client, msg protocol.WSMessa
 		if msg.To != "" {
 			h.sendTo(msg.To, msg)
 		}
+	case protocol.MsgWorkerPluginState:
+		h.handleWorkerPluginState(c, msg)
 	}
 }
 
