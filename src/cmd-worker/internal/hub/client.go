@@ -48,6 +48,7 @@ func (c *Client) connect(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("dial %s: %w", wsURL, err)
 	}
+	conn.SetReadLimit(-1) // default 32 KiB truncates large task lists / histories
 	c.conn = conn
 	c.connected = true
 	slog.Info("hub connected", "nick", c.nick)

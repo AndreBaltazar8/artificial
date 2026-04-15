@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"syscall"
 
@@ -56,6 +57,7 @@ func (h *Hub) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 		slog.Error("ws accept", "err", err)
 		return
 	}
+	conn.SetReadLimit(-1) // default 32 KiB truncates large task lists / histories
 	defer conn.Close(websocket.StatusNormalClosure, "bye")
 
 	c := &client{nick: nick, conn: conn}
@@ -387,10 +389,16 @@ func (h *Hub) handleTaskCreate(c *client, msg protocol.WSMessage) {
 		}
 	}
 
-	data, _ := json.Marshal(task)
+	// Strip description from the broadcast payload — subscribers only need
+	// id/title/status/assignee to render the notification; full body lives
+	// behind task_get. Keeps the wire small and the notification focused.
+	broadcast := task
+	broadcast.Description = ""
+	data, _ := json.Marshal(broadcast)
 	h.broadcastToTaskSubscribers(task.ID, protocol.WSMessage{
 		Type: protocol.MsgTaskCreated,
 		Data: data,
+		Text: "created",
 	}, "")
 }
 
@@ -423,10 +431,31 @@ func (h *Hub) handleTaskUpdate(c *client, msg protocol.WSMessage) {
 		return
 	}
 
-	data, _ := json.Marshal(task)
+	// Describe what actually changed, so subscribers don't need the full task.
+	var actions []string
+	if input.Status != nil {
+		actions = append(actions, "status="+*input.Status)
+	}
+	if input.Assignee != nil {
+		a := *input.Assignee
+		if a == "" {
+			a = "unassigned"
+		}
+		actions = append(actions, "assignee="+a)
+	}
+	action := "updated"
+	if len(actions) > 0 {
+		action = strings.Join(actions, ", ")
+	}
+
+	// Strip description from the broadcast payload — see handleTaskCreate.
+	broadcast := task
+	broadcast.Description = ""
+	data, _ := json.Marshal(broadcast)
 	h.broadcastToTaskSubscribers(input.ID, protocol.WSMessage{
 		Type: protocol.MsgTaskUpdated,
 		Data: data,
+		Text: action,
 	}, "")
 }
 
@@ -444,6 +473,14 @@ func (h *Hub) handleTaskList(c *client, msg protocol.WSMessage) {
 	result, err := h.db.ListTasks(input.Status, input.Assignee, input.ProjectID, input.Limit)
 	if err != nil {
 		return
+	}
+	// Truncate descriptions on the wire — list view only needs a preview, and
+	// full descriptions can push the response past the websocket read limit.
+	for i := range result.Tasks {
+		d := result.Tasks[i].Description
+		if len(d) > 200 {
+			result.Tasks[i].Description = d[:200] + fmt.Sprintf("... (truncated, use task_get(%d) for full task)", result.Tasks[i].ID)
+		}
 	}
 	data, _ := json.Marshal(result)
 	h.sendTo(c.nick, protocol.WSMessage{
