@@ -190,6 +190,9 @@ func (a *ACP) Start() error {
 	if a.hubClient != nil {
 		instructions := buildMCPInstructions(a.cfg.Nickname)
 		a.mcpSrv = mcpserver.New(a.cfg.Nickname, a.cfg.Role, a.cfg.ProjectID, a.hubClient, instructions)
+		if a.cfg.PluginHost != nil {
+			a.mcpSrv.RegisterPluginTools(a.cfg.PluginHost.Tools())
+		}
 		port, err := a.mcpSrv.Start() // StreamableHTTP
 		if err != nil {
 			return fmt.Errorf("start mcp server: %w", err)

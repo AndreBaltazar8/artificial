@@ -2,6 +2,7 @@ package db
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -160,7 +161,17 @@ var migrations = []migration{
 		);
 		INSERT OR IGNORE INTO channels (name, topic) VALUES ('general', 'General discussion');
 	`},
-	// -- future migrations go here as {2, `...`}, etc.
+	{2, `
+		CREATE TABLE IF NOT EXISTS plugins (
+			id          INTEGER PRIMARY KEY AUTOINCREMENT,
+			name        TEXT UNIQUE NOT NULL,
+			path        TEXT NOT NULL,
+			enabled     INTEGER NOT NULL DEFAULT 1,
+			config_json TEXT NOT NULL DEFAULT '{}',
+			created_at  TEXT DEFAULT (datetime('now'))
+		);
+	`},
+	// -- future migrations go here as {3, `...`}, etc.
 }
 
 func now() string { return time.Now().UTC().Format(time.DateTime) }
@@ -1145,4 +1156,140 @@ func (d *DB) GetWorkerLogs(workerID int64) ([]WorkerLog, error) {
 		out = append(out, l)
 	}
 	return out, rows.Err()
+}
+
+// ── Plugins ─────────────────────────────────────────────────────────────
+//
+// Plugin rows only persist the static config: name (the stable identifier
+// matching ArtificialPlugin.Name()), path (filesystem path to the plugin
+// binary), enabled flag, and a JSON config blob plugin authors can read at
+// load time. Runtime state (which workers have the plugin loaded, which
+// tools are currently registered, last load error) is NOT stored here —
+// it lives in Hub in-memory aggregation populated by MsgWorkerPluginState
+// reports from workers. Query paths that surface a Plugin to the dashboard
+// must layer that runtime state on top of what these methods return.
+
+// ListPlugins returns every plugin row, ordered by name.
+func (d *DB) ListPlugins() ([]protocol.Plugin, error) {
+	rows, err := d.db.Query(
+		`SELECT id, name, path, enabled, config_json, created_at FROM plugins ORDER BY name`,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []protocol.Plugin
+	for rows.Next() {
+		p, err := scanPlugin(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+// GetPlugin fetches a single plugin by id. Returns sql.ErrNoRows if the
+// id is unknown — callers should translate that to a 404.
+func (d *DB) GetPlugin(id int64) (protocol.Plugin, error) {
+	row := d.db.QueryRow(
+		`SELECT id, name, path, enabled, config_json, created_at FROM plugins WHERE id = ?`,
+		id,
+	)
+	return scanPlugin(row)
+}
+
+// GetPluginByName is the workhorse the pluginhost loader calls to
+// resolve a plugin name to its binary path + config. Returns
+// sql.ErrNoRows when the plugin is absent.
+func (d *DB) GetPluginByName(name string) (protocol.Plugin, error) {
+	row := d.db.QueryRow(
+		`SELECT id, name, path, enabled, config_json, created_at FROM plugins WHERE name = ?`,
+		name,
+	)
+	return scanPlugin(row)
+}
+
+// UpsertPlugin creates a plugin row, or updates an existing row if one
+// already exists with the same name. Used by POST /api/plugins from the
+// dashboard. configJSON must be a valid JSON document or "{}" — an empty
+// string is normalised to "{}" to satisfy the NOT NULL constraint.
+func (d *DB) UpsertPlugin(name, path string, enabled bool, configJSON string) (protocol.Plugin, error) {
+	if configJSON == "" {
+		configJSON = "{}"
+	}
+	enabledInt := 0
+	if enabled {
+		enabledInt = 1
+	}
+	_, err := d.db.Exec(
+		`INSERT INTO plugins (name, path, enabled, config_json) VALUES (?, ?, ?, ?)
+		 ON CONFLICT(name) DO UPDATE SET path = excluded.path, enabled = excluded.enabled, config_json = excluded.config_json`,
+		name, path, enabledInt, configJSON,
+	)
+	if err != nil {
+		return protocol.Plugin{}, err
+	}
+	return d.GetPluginByName(name)
+}
+
+// SetPluginEnabled flips the enabled flag for a plugin. The dashboard
+// toggle button hits this path via PATCH /api/plugins/{id}.
+func (d *DB) SetPluginEnabled(id int64, enabled bool) (protocol.Plugin, error) {
+	enabledInt := 0
+	if enabled {
+		enabledInt = 1
+	}
+	if _, err := d.db.Exec(`UPDATE plugins SET enabled = ? WHERE id = ?`, enabledInt, id); err != nil {
+		return protocol.Plugin{}, err
+	}
+	return d.GetPlugin(id)
+}
+
+// SetPluginConfig replaces the config JSON blob for a plugin. Caller is
+// responsible for validating JSON shape before invoking.
+func (d *DB) SetPluginConfig(id int64, configJSON string) (protocol.Plugin, error) {
+	if configJSON == "" {
+		configJSON = "{}"
+	}
+	if _, err := d.db.Exec(`UPDATE plugins SET config_json = ? WHERE id = ?`, configJSON, id); err != nil {
+		return protocol.Plugin{}, err
+	}
+	return d.GetPlugin(id)
+}
+
+// DeletePlugin removes a plugin row. No cascade — workers that already
+// loaded the plugin keep running with it until they reload; the Hub
+// aggregator is responsible for garbage-collecting stale runtime state.
+func (d *DB) DeletePlugin(id int64) error {
+	_, err := d.db.Exec(`DELETE FROM plugins WHERE id = ?`, id)
+	return err
+}
+
+// scanPlugin is a small helper shared by the row-at-a-time query paths.
+// It lifts the shared Scan logic out of each call site so the JSON
+// config parse happens in exactly one place.
+func scanPlugin(r interface {
+	Scan(dest ...any) error
+}) (protocol.Plugin, error) {
+	var (
+		p          protocol.Plugin
+		enabledInt int
+		configJSON string
+	)
+	if err := r.Scan(&p.ID, &p.Name, &p.Path, &enabledInt, &configJSON, &p.CreatedAt); err != nil {
+		return protocol.Plugin{}, err
+	}
+	p.Enabled = enabledInt == 1
+	if configJSON != "" && configJSON != "{}" {
+		// Best-effort parse — a malformed config does not stop us from
+		// returning the row; the dashboard renders it as a raw string.
+		var parsed any
+		if err := json.Unmarshal([]byte(configJSON), &parsed); err == nil {
+			p.Config = parsed
+		} else {
+			p.Config = configJSON
+		}
+	}
+	return p, nil
 }

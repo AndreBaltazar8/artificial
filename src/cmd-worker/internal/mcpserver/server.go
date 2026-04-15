@@ -12,6 +12,7 @@ import (
 
 	"artificial.pt/pkg-go-shared/protocol"
 	"artificial.pt/cmd-worker/internal/hub"
+	"artificial.pt/cmd-worker/internal/pluginhost"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -92,6 +93,65 @@ func (s *Server) Stop() {
 
 // Port returns the port the server is listening on.
 func (s *Server) Port() int { return s.port }
+
+// RegisterPluginTools grafts every tool returned by the pluginhost host
+// onto this MCP server. Safe to call multiple times — the MCP SDK's
+// AddTool semantics are last-write-wins by name, so a reload that
+// replaces a plugin's tool just updates the handler in place.
+//
+// This is the bridge between the plugin subsystem and the MCP server:
+// mcpserver has zero compile-time knowledge of any specific plugin tool
+// name or input shape. All it knows is "here is a name, here is a JSON
+// Schema, here is a function that takes raw JSON and returns raw JSON".
+// Everything downstream of the pluginhost.RegisteredTool closure — the
+// subprocess, the netrpc round-trip, the harness control server — is
+// invisible to this layer.
+func (s *Server) RegisterPluginTools(tools []pluginhost.RegisteredTool) {
+	for _, t := range tools {
+		// Wrap the pluginhost closure in an MCP ToolHandler. The MCP SDK
+		// hands us a CallToolRequest whose Params.Arguments is already
+		// json.RawMessage — pass it through verbatim so the plugin's
+		// Execute sees exactly the bytes the agent submitted.
+		tool := t
+		s.mcpServer.AddTool(
+			&gomcp.Tool{
+				Name:        tool.Descriptor.Name,
+				Description: tool.Descriptor.Description,
+				InputSchema: json.RawMessage(tool.Descriptor.InputSchema),
+			},
+			func(ctx context.Context, req *gomcp.CallToolRequest) (*gomcp.CallToolResult, error) {
+				var args json.RawMessage
+				if req.Params.Arguments != nil {
+					args = req.Params.Arguments
+				}
+				result, err := tool.Execute(args)
+				if err != nil {
+					return nil, err
+				}
+				// Plugin result is returned as a text content block. The
+				// plugin decides whether the bytes are JSON-structured
+				// or plain text; the agent sees them verbatim either way.
+				return &gomcp.CallToolResult{
+					Content: []gomcp.Content{
+						&gomcp.TextContent{Text: string(result)},
+					},
+				}, nil
+			},
+		)
+		slog.Info("mcp: registered plugin tool", "tool", tool.Descriptor.Name, "plugin", tool.PluginName)
+	}
+}
+
+// UnregisterPluginTools removes previously-grafted plugin tools by
+// name. Called on reload before re-registering so stale handlers don't
+// linger if a plugin removed a tool from its Tools() list between
+// reloads.
+func (s *Server) UnregisterPluginTools(names []string) {
+	if len(names) == 0 {
+		return
+	}
+	s.mcpServer.RemoveTools(names...)
+}
 
 // channelNotificationParams matches the schema Claude expects for notifications/claude/channel.
 type channelNotificationParams struct {
@@ -808,9 +868,6 @@ func (s *Server) registerTools() {
 			}
 			lines += fmt.Sprintf("#%d [%s] %s → %s\n", t.ID, t.Status, t.Title, assignee)
 			desc := strings.ReplaceAll(t.Description, "\n", " ")
-			if len(desc) > 200 {
-				desc = desc[:200] + fmt.Sprintf("... (truncated, use task_get(%d) for full task)", t.ID)
-			}
 			if desc != "" {
 				lines += "  " + desc + "\n"
 			}

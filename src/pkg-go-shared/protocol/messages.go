@@ -90,3 +90,33 @@ const (
 	MsgFireWorker  = "fire_worker"
 	MsgSpawnWorker = "spawn_worker"
 )
+
+// WebSocket message types for plugin CRUD (dashboard → server).
+//
+// CRUD goes over WS rather than REST to match the pattern used by tasks
+// and reviews — the dashboard already holds an open socket for
+// live-update broadcasts, so plugin mutations pipe through the same hub.
+// Parallel REST handlers on /api/plugins exist for workers + tooling
+// that prefer HTTP.
+const (
+	MsgPluginList   = "plugin_list"
+	MsgPluginCreate = "plugin_create"
+	MsgPluginUpdate = "plugin_update"
+	MsgPluginDelete = "plugin_delete"
+	MsgPluginReload = "plugin_reload"
+)
+
+// WebSocket message types for plugin runtime state (server ↔ worker).
+//
+// MsgWorkerPluginState: worker → server. Sent once after pluginhost has
+// dispensed all enabled plugins on spawn, and again on any reload event
+// (dashboard-initiated or plugin-process-exit-triggered). The Data field
+// carries a marshalled WorkerPluginState.
+//
+// MsgPluginChanged: server → worker. Broadcast when a plugin row's
+// enabled flag flips or a reload is requested. Workers re-read the
+// plugin list via HTTP and reconcile their pluginhost registry.
+const (
+	MsgWorkerPluginState = "worker_plugin_state"
+	MsgPluginChanged     = "plugin_changed"
+)

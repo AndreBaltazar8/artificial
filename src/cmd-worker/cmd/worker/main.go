@@ -17,6 +17,7 @@ import (
 	"artificial.pt/pkg-go-shared/protocol"
 	"artificial.pt/cmd-worker/internal/harness"
 	"artificial.pt/cmd-worker/internal/hub"
+	"artificial.pt/cmd-worker/internal/pluginhost"
 )
 
 func main() {
@@ -81,11 +82,30 @@ func main() {
 	// 4. Create the harness based on employee config
 	var h harness.Harness
 
-	// Connect to hub WebSocket (handler set after harness is created)
-	hubClient := hub.New(*serverURL, nick, func(msg protocol.WSMessage) {
-		handleHubMessage(msg, nick, h)
+	// 4a. Launch plugins BEFORE the harness so their tools are available
+	// when mcpserver registers the toolbelt. Individual plugin load
+	// failures are non-fatal — the worker boots, the broken plugin shows
+	// up in State() with an Error string, and the dashboard surfaces it.
+	host := pluginhost.New(*serverURL)
+	if err := host.LoadAll(ctx); err != nil {
+		slog.Warn("pluginhost: LoadAll failed, continuing without plugins", "err", err)
+	}
+	defer host.Shutdown()
+
+	// Connect to hub WebSocket (handler set after harness is created).
+	// Forwarding `host` into the handler lets MsgPluginChanged trigger a
+	// reconcile — LoadAll is idempotent, so a reload just diffs the DB
+	// state against what's running.
+	var hubClient *hub.Client
+	hubClient = hub.New(*serverURL, nick, func(msg protocol.WSMessage) {
+		handleHubMessage(msg, nick, h, host, hubClient)
 	})
 	go hubClient.ConnectWithRetry(ctx)
+
+	// Fire-and-forget: once the hub is connected, report the initial
+	// pluginhost state so the dashboard sees what this worker loaded.
+	// Retries every second until the first Send succeeds or ctx cancels.
+	go reportPluginStateOnConnect(ctx, hubClient, host)
 
 	cfg := harness.Config{
 		Nickname:             nick,
@@ -100,6 +120,7 @@ func main() {
 		ACPURL:               empConfig.Employee.ACPURL,
 		ACPProvider:          empConfig.Employee.ACPProvider,
 		Model:                empConfig.Employee.Model,
+		PluginHost:           host,
 	}
 
 	switch empConfig.Employee.Harness {
@@ -155,8 +176,62 @@ func main() {
 	}
 }
 
+// reportPluginStateOnConnect sends the current host.State() over the
+// hub once the WebSocket is connected. Retries every second until the
+// first send succeeds because ConnectWithRetry runs asynchronously and
+// there's a brief window after startup where hubClient.Send returns
+// "not connected".
+func reportPluginStateOnConnect(ctx context.Context, hc *hub.Client, host *pluginhost.Host) {
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+		if hc.IsConnected() {
+			sendPluginState(hc, host)
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(1 * time.Second):
+		}
+	}
+}
+
+// sendPluginState marshals host.State() and fires MsgWorkerPluginState
+// to the server. Best-effort: the Hub aggregator treats absent reports
+// as "worker has no plugins loaded", which is the correct default.
+func sendPluginState(hc *hub.Client, host *pluginhost.Host) {
+	data, err := json.Marshal(host.State())
+	if err != nil {
+		slog.Error("pluginhost: marshal state", "err", err)
+		return
+	}
+	if err := hc.Send(protocol.WSMessage{
+		Type: protocol.MsgWorkerPluginState,
+		Data: data,
+	}); err != nil {
+		slog.Warn("pluginhost: send state", "err", err)
+	}
+}
+
 // handleHubMessage processes messages from svc-artificial and pushes them to the harness.
-func handleHubMessage(msg protocol.WSMessage, myNick string, h harness.Harness) {
+func handleHubMessage(msg protocol.WSMessage, myNick string, h harness.Harness, host *pluginhost.Host, hc *hub.Client) {
+	// MsgPluginChanged is routed to the pluginhost even before the
+	// harness exists — a reload during startup must not be dropped just
+	// because the harness hasn't been constructed yet.
+	if msg.Type == protocol.MsgPluginChanged {
+		if host == nil {
+			return
+		}
+		slog.Info("pluginhost: reload triggered", "plugin", msg.Text)
+		if err := host.LoadAll(context.Background()); err != nil {
+			slog.Error("pluginhost: reload failed", "err", err)
+		}
+		sendPluginState(hc, host)
+		return
+	}
+
 	if h == nil {
 		return
 	}
@@ -213,12 +288,16 @@ func handleHubMessage(msg protocol.WSMessage, myNick string, h harness.Harness) 
 	case protocol.MsgTaskCreated, protocol.MsgTaskUpdated:
 		var t protocol.Task
 		json.Unmarshal(msg.Data, &t)
-		action := "created"
-		if msg.Type == protocol.MsgTaskUpdated {
-			action = "updated"
+		action := msg.Text
+		if action == "" {
+			if msg.Type == protocol.MsgTaskUpdated {
+				action = "updated"
+			} else {
+				action = "created"
+			}
 		}
 		h.PushNotification(
-			fmt.Sprintf("Task #%d \"%s\" %s: status=%s, assignee=%s", t.ID, t.Title, action, t.Status, t.Assignee),
+			fmt.Sprintf("Task #%d %q — %s — task_get(%d) for details", t.ID, t.Title, action, t.ID),
 			map[string]string{"chat_id": "tasks", "user": t.CreatedBy},
 		)
 

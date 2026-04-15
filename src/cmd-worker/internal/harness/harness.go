@@ -2,6 +2,8 @@
 // and provides a factory to create the correct harness based on employee config.
 package harness
 
+import "artificial.pt/cmd-worker/internal/pluginhost"
+
 // Harness abstracts agent process lifecycle. Each agent type (claude, acp)
 // implements this interface to provide a uniform way to start agents, push
 // notifications, and wait for them to finish.
@@ -60,4 +62,9 @@ type Config struct {
 	ACPURL      string // External ACP server URL (if empty, auto-spawn based on provider)
 	ACPProvider string // ACP provider to auto-spawn: "opencode", etc.
 	Model       string
+
+	// PluginHost, if non-nil, is the pluginhost the harness should query
+	// for plugin-contributed tools immediately after constructing its
+	// mcpserver. Populated by cmd/worker/main.go after LoadAll succeeds.
+	PluginHost *pluginhost.Host
 }

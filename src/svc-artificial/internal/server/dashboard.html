@@ -202,6 +202,7 @@ main { flex: 1; display: flex; overflow: hidden; }
     <div class="tab" data-view="team" onclick="switchView('team')">Team</div>
     <div class="tab" data-view="workers" onclick="switchView('workers')">Workers</div>
     <div class="tab" data-view="reviews" onclick="switchView('reviews')">Reviews <span id="reviewBadge" class="badge" style="display:none">0</span></div>
+    <div class="tab" data-view="plugins" onclick="switchView('plugins')">Plugins</div>
     <div class="tab" data-view="settings" onclick="switchView('settings')">Settings</div>
   </div>
   <div style="display:flex;gap:6px;margin-left:8px">
@@ -268,6 +269,17 @@ main { flex: 1; display: flex; overflow: hidden; }
 
   <!-- Reviews View -->
   <div class="projects-view" id="reviewsView"></div>
+
+  <!-- Plugins View -->
+  <div class="projects-view" id="pluginsView" style="padding:20px;max-width:900px">
+    <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px">
+      <h2 style="margin:0;font-size:14px">Plugins</h2>
+      <span style="font-size:10px;color:var(--text3)">Registered plugins are loaded by every worker at spawn. Each plugin may expose MCP tools to all agents.</span>
+      <div style="flex:1"></div>
+      <button class="btn primary" style="padding:4px 10px;font-size:11px" onclick="showModal('pluginModal')">+ Register Plugin</button>
+    </div>
+    <div id="pluginList"></div>
+  </div>
 
   <!-- Settings View -->
   <div class="projects-view" id="settingsView" style="padding:20px;max-width:600px">
@@ -368,6 +380,20 @@ main { flex: 1; display: flex; overflow: hidden; }
   <label>Assignee</label><input id="taskAssignee" placeholder="nickname">
   <label>Project</label><select id="taskProject"><option value="">None</option></select>
   <div class="actions"><button class="btn" onclick="hideModal('taskModal')">Cancel</button><button class="btn primary" onclick="createTask()">Create</button></div>
+</div>
+</div>
+
+<!-- Plugin Modal -->
+<div class="modal-overlay" id="pluginModal">
+<div class="modal" style="min-width:480px">
+  <h2>Register Plugin</h2>
+  <label>Name <span style="font-size:9px;color:var(--text3)">(unique, e.g. "harness")</span></label>
+  <input id="pluginName" placeholder="harness">
+  <label>Binary path <span style="font-size:9px;color:var(--text3)">(absolute)</span></label>
+  <input id="pluginPath" placeholder="/absolute/path/to/plugin-binary">
+  <label>Config JSON <span style="font-size:9px;color:var(--text3)">(optional)</span></label>
+  <textarea id="pluginConfig" rows="4" placeholder='{"key":"value"}'></textarea>
+  <div class="actions"><button class="btn" onclick="hideModal('pluginModal')">Cancel</button><button class="btn primary" onclick="registerPlugin()">Register</button></div>
 </div>
 </div>
 
@@ -1135,7 +1161,7 @@ function switchChannel(name) {
 
 function switchView(view) {
   document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.view === view));
-  ['chatView','boardView','projectsView','teamView','workersView','reviewsView','settingsView'].forEach(id => {
+  ['chatView','boardView','projectsView','teamView','workersView','reviewsView','pluginsView','settingsView'].forEach(id => {
     document.getElementById(id).classList.toggle('active', id === view + 'View');
   });
   if (view === 'board') loadTasks();
@@ -1143,6 +1169,7 @@ function switchView(view) {
   if (view === 'team') loadMembers();
   if (view === 'workers') loadWorkers();
   if (view === 'reviews') loadReviews();
+  if (view === 'plugins') loadPlugins();
   if (view === 'settings') loadSettings();
 }
 
@@ -1320,6 +1347,98 @@ async function loadProjects() {
   const sel = document.getElementById('taskProject');
   sel.innerHTML = '<option value="">None</option>' + projects.map(p => `<option value="${p.id}">${p.name}</option>`).join('');
   renderProjects();
+}
+
+// ── Plugins View ──
+let plugins = [];
+
+async function loadPlugins() {
+  const el = document.getElementById('pluginList');
+  try {
+    const res = await fetch('/api/plugins');
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    plugins = Array.isArray(data) ? data : [];
+  } catch (err) {
+    el.innerHTML = `<div style="color:var(--red);font-size:12px;padding:12px">Failed to load plugins: ${escHtml(err.message)}</div>`;
+    return;
+  }
+  renderPlugins();
+}
+
+function renderPlugins() {
+  const el = document.getElementById('pluginList');
+  if (!plugins.length) {
+    el.innerHTML = '<div style="color:var(--text3);font-size:12px;padding:12px">No plugins registered. Click "+ Register Plugin" to add one.</div>';
+    return;
+  }
+  el.innerHTML = plugins.map(p => {
+    const statusColor = p.status === 'error' ? 'var(--red)' : (p.enabled ? 'var(--green)' : 'var(--text3)');
+    const statusText = p.status || (p.enabled ? 'enabled' : 'disabled');
+    const loadedIn = typeof p.loaded_in_workers === 'number' ? `${p.loaded_in_workers} worker(s)` : '—';
+    const tools = Array.isArray(p.tools) && p.tools.length ? p.tools.join(', ') : '—';
+    return `<div class="project-card" style="margin-bottom:8px">
+      <div class="project-header">
+        <h3>${escHtml(p.name)} <span style="color:${statusColor};font-size:10px">● ${escHtml(statusText)}</span></h3>
+        <div class="path">${escHtml(p.path || '')}</div>
+        <div style="font-size:10px;color:var(--text3);margin-top:4px">loaded in: ${loadedIn} · tools: ${escHtml(tools)}</div>
+        ${p.last_error ? `<div style="font-size:10px;color:var(--red);margin-top:4px">error: ${escHtml(p.last_error)}</div>` : ''}
+      </div>
+      <div class="project-footer" style="gap:6px">
+        <label style="font-size:11px;color:var(--text2);display:flex;align-items:center;gap:4px">
+          <input type="checkbox" ${p.enabled ? 'checked' : ''} onchange="togglePlugin(${p.id}, this.checked)"> enabled
+        </label>
+        <div style="flex:1"></div>
+        <button class="btn" onclick="reloadPlugin(${p.id})">Reload</button>
+        <button class="btn" style="border-color:var(--red);color:var(--red)" onclick="deletePlugin(${p.id})">Delete</button>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+async function registerPlugin() {
+  const name = document.getElementById('pluginName').value.trim();
+  const path = document.getElementById('pluginPath').value.trim();
+  const cfgRaw = document.getElementById('pluginConfig').value.trim();
+  if (!name || !path) return;
+  let config = null;
+  if (cfgRaw) {
+    try { config = JSON.parse(cfgRaw); }
+    catch (e) { alert('Config must be valid JSON'); return; }
+  }
+  const body = { name, path, enabled: true, config };
+  const res = await fetch('/api/plugins', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: 'unknown error' }));
+    alert(`Register failed: ${err.error || res.status}`);
+    return;
+  }
+  hideModal('pluginModal');
+  document.getElementById('pluginName').value = '';
+  document.getElementById('pluginPath').value = '';
+  document.getElementById('pluginConfig').value = '';
+  loadPlugins();
+}
+
+async function togglePlugin(id, enabled) {
+  await fetch(`/api/plugins/${id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled }) });
+  loadPlugins();
+}
+
+async function reloadPlugin(id) {
+  const res = await fetch(`/api/plugins/${id}/reload`, { method: 'POST' });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: 'unknown error' }));
+    alert(`Reload failed: ${err.error || res.status}`);
+    return;
+  }
+  loadPlugins();
+}
+
+async function deletePlugin(id) {
+  if (!confirm('Unregister this plugin? Workers will drop it on next reload.')) return;
+  await fetch(`/api/plugins/${id}`, { method: 'DELETE' });
+  loadPlugins();
 }
 
 // ── Team View ──

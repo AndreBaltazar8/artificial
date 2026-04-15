@@ -54,6 +54,9 @@ func (c *Codex) Start() error {
 	// Start MCP server for tools
 	instructions := buildCodexMCPInstructions(c.cfg.Nickname)
 	c.mcpSrv = mcpserver.New(c.cfg.Nickname, c.cfg.Role, c.cfg.ProjectID, c.hubClient, instructions)
+	if c.cfg.PluginHost != nil {
+		c.mcpSrv.RegisterPluginTools(c.cfg.PluginHost.Tools())
+	}
 	mcpPort, err := c.mcpSrv.Start()
 	if err != nil {
 		return err

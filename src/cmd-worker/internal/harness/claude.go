@@ -34,6 +34,9 @@ func NewClaude(ctx context.Context, cfg Config, hubClient *hub.Client) *Claude {
 func (c *Claude) Start() error {
 	instructions := buildMCPInstructions(c.cfg.Nickname)
 	c.mcpSrv = mcpserver.New(c.cfg.Nickname, c.cfg.Role, c.cfg.ProjectID, c.hubClient, instructions)
+	if c.cfg.PluginHost != nil {
+		c.mcpSrv.RegisterPluginTools(c.cfg.PluginHost.Tools())
+	}
 	mcpPort, err := c.mcpSrv.Start()
 	if err != nil {
 		return err

@@ -96,3 +96,51 @@ type ChannelMember struct {
 	EmployeeID  int64  `json:"employee_id"`
 	JoinedAt    string `json:"joined_at"`
 }
+
+// Plugin represents an external go-plugin binary that workers load on
+// start. Workers register their MCP tools from each enabled plugin's
+// Tools() output at load time.
+//
+// The persisted columns (id, name, path, enabled, config, created_at)
+// come straight from the `plugins` table. The runtime fields
+// (LoadedInWorkers, Tools, Status, LastError) are populated from Hub
+// in-memory state aggregated from MsgWorkerPluginState reports, so they
+// reflect what's actually running right now — not what the DB says
+// should be running.
+type Plugin struct {
+	ID        int64  `json:"id"`
+	Name      string `json:"name"`
+	Path      string `json:"path"`
+	Enabled   bool   `json:"enabled"`
+	Config    any    `json:"config,omitempty"` // parsed JSON
+	CreatedAt string `json:"created_at"`
+
+	// runtime (not persisted)
+	LoadedInWorkers int      `json:"loaded_in_workers"`
+	Tools           []string `json:"tools,omitempty"`
+	Status          string   `json:"status,omitempty"`     // enabled | disabled | error
+	LastError       string   `json:"last_error,omitempty"`
+}
+
+// WorkerPluginState is the payload a worker sends to the server via
+// MsgWorkerPluginState to report which plugins it has loaded and what
+// tools each is exposing. Sent on worker spawn (after pluginhost has
+// dispensed all enabled plugins) and on any subsequent reload event.
+//
+// The Hub aggregates these reports per-plugin-name in memory so the
+// dashboard's /api/plugins response can show "loaded in N workers" and
+// the current set of tool names without any persistence round-trip.
+type WorkerPluginState struct {
+	Plugins []LoadedPlugin `json:"plugins"`
+}
+
+// LoadedPlugin is a single entry in WorkerPluginState.Plugins.
+//
+// Error is non-empty only when the plugin failed to load on this worker
+// — in that case Tools will be empty. The Hub uses that signal to flip
+// the plugin's aggregated Status to "error" with LastError set.
+type LoadedPlugin struct {
+	Name  string   `json:"name"`
+	Tools []string `json:"tools,omitempty"`
+	Error string   `json:"error,omitempty"`
+}

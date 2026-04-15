@@ -78,6 +78,12 @@ func (s *Server) registerAPI() {
 	s.Mux.HandleFunc("PUT /api/workers/{id}/transcript", s.apiSetWorkerTranscript)
 	s.Mux.HandleFunc("GET /api/workers/{id}/transcript", s.apiStreamWorkerTranscript)
 	s.Mux.HandleFunc("GET /api/workers/{id}/tty", s.apiStreamWorkerTTY)
+
+	s.Mux.HandleFunc("GET /api/plugins", s.apiListPlugins)
+	s.Mux.HandleFunc("POST /api/plugins", s.apiCreatePlugin)
+	s.Mux.HandleFunc("PATCH /api/plugins/{id}", s.apiUpdatePlugin)
+	s.Mux.HandleFunc("POST /api/plugins/{id}/reload", s.apiReloadPlugin)
+	s.Mux.HandleFunc("DELETE /api/plugins/{id}", s.apiDeletePlugin)
 }
 
 func writeJSON(w http.ResponseWriter, v any) {
