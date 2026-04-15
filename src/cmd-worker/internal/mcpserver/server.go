@@ -12,7 +12,7 @@ import (
 
 	"artificial.pt/pkg-go-shared/protocol"
 	"artificial.pt/cmd-worker/internal/hub"
-	"artificial.pt/cmd-worker/internal/pluginhost"
+	"artificial.pt/pkg-go-shared/pluginhost"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 )

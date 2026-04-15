@@ -14,10 +14,10 @@ import (
 	"strings"
 	"time"
 
+	"artificial.pt/pkg-go-shared/pluginhost"
 	"artificial.pt/pkg-go-shared/protocol"
 	"artificial.pt/cmd-worker/internal/harness"
 	"artificial.pt/cmd-worker/internal/hub"
-	"artificial.pt/cmd-worker/internal/pluginhost"
 )
 
 func main() {
@@ -82,13 +82,19 @@ func main() {
 	// 4. Create the harness based on employee config
 	var h harness.Harness
 
-	// 4a. Launch plugins BEFORE the harness so their tools are available
-	// when mcpserver registers the toolbelt. Individual plugin load
-	// failures are non-fatal — the worker boots, the broken plugin shows
-	// up in State() with an Error string, and the dashboard surfaces it.
-	host := pluginhost.New(*serverURL)
-	if err := host.LoadAll(ctx); err != nil {
-		slog.Warn("pluginhost: LoadAll failed, continuing without plugins", "err", err)
+	// 4a. Launch worker-scope plugins BEFORE the harness so their tools
+	// are available when mcpserver registers the toolbelt. Host-scope
+	// plugins (the default) are owned by svc-artificial and reached via
+	// the hub — the worker never spawns a subprocess for those. Individual
+	// plugin load failures are non-fatal: the worker boots, the broken
+	// plugin shows up in State() with an Error string, and the dashboard
+	// surfaces it.
+	host := pluginhost.New(protocol.PluginScopeWorker)
+	plugins, err := fetchPluginList(ctx, *serverURL)
+	if err != nil {
+		slog.Warn("pluginhost: fetch plugin list failed, continuing without worker-scope plugins", "err", err)
+	} else if err := host.Reconcile(ctx, plugins); err != nil {
+		slog.Warn("pluginhost: Reconcile failed, continuing without worker-scope plugins", "err", err)
 	}
 	defer host.Shutdown()
 
@@ -121,6 +127,7 @@ func main() {
 		ACPProvider:          empConfig.Employee.ACPProvider,
 		Model:                empConfig.Employee.Model,
 		PluginHost:           host,
+		HubClient:            hubClient,
 	}
 
 	switch empConfig.Employee.Harness {
@@ -141,6 +148,14 @@ func main() {
 		os.Exit(1)
 	}
 	defer h.Stop()
+
+	// 5a. Re-register plugin tools once the hub has connected so the
+	// host-scope tool list fetched from svc-artificial (via
+	// MsgHostToolList) gets grafted onto the MCP server. Start() was
+	// called synchronously before hubClient could finish its dial, so
+	// at that point combinedPluginTools() would have skipped the
+	// host-scope fetch — this is the first chance to back-fill it.
+	go reloadHostToolsOnConnect(ctx, hubClient, h)
 
 	// 6. Report transcript path based on harness type
 	if ch, ok := h.(*harness.Claude); ok {
@@ -173,6 +188,32 @@ func main() {
 
 	if result.SessionID != "" {
 		updateWorkerSessionID(*serverURL, workerID, result.SessionID)
+	}
+}
+
+// reloadHostToolsOnConnect waits for the hub to come up and then asks
+// the harness to re-register its plugin tool set. At this point
+// combinedPluginTools() inside the harness can actually reach
+// svc-artificial for the host-scope tool list, so the initial empty
+// snapshot registered at Start() time gets replaced with the real
+// deal. The MCP SDK's AddTool is last-write-wins by name so replacing
+// handlers in place is safe.
+func reloadHostToolsOnConnect(ctx context.Context, hc *hub.Client, h harness.Harness) {
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+		if hc.IsConnected() {
+			if h != nil {
+				h.ReloadPluginTools()
+			}
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(1 * time.Second):
+		}
 	}
 }
 
@@ -225,8 +266,26 @@ func handleHubMessage(msg protocol.WSMessage, myNick string, h harness.Harness, 
 			return
 		}
 		slog.Info("pluginhost: reload triggered", "plugin", msg.Text)
-		if err := host.LoadAll(context.Background()); err != nil {
+		ctx := context.Background()
+		plugins, err := fetchPluginList(ctx, hc.ServerURL())
+		if err != nil {
+			slog.Error("pluginhost: fetch plugin list failed", "err", err)
+		} else if err := host.Reconcile(ctx, plugins); err != nil {
 			slog.Error("pluginhost: reload failed", "err", err)
+		}
+		// Re-graft the post-reload tool set onto the live MCP server.
+		// Reconcile has just killed the previous plugin subprocesses
+		// and relaunched any still-enabled ones (for worker-scope
+		// plugins) and/or the host-scope tool list has changed, so the
+		// tool handler closures captured at harness Start time are
+		// pointing at stale bindings. Without this call every
+		// subsequent tool call via the MCP session returns
+		// "connection is shut down". The harness may be nil if reload
+		// fires during startup before the harness is constructed, in
+		// which case the next Start call will register fresh closures
+		// anyway.
+		if h != nil {
+			h.ReloadPluginTools()
 		}
 		sendPluginState(hc, host)
 		return
@@ -342,6 +401,36 @@ func handleHubMessage(msg protocol.WSMessage, myNick string, h harness.Harness, 
 }
 
 // ── HTTP helpers for svc-artificial API ─────────────────────────────────
+
+// fetchPluginList is the HTTP-backed source of truth for the worker's
+// view of the plugin catalog. Replaces the old pluginhost-internal
+// fetchPluginList that lived inside Host before the shared-package
+// move — the shared Host no longer knows how to reach svc-artificial,
+// so the caller does the fetch and hands the list to Reconcile.
+// Returns both host-scope and worker-scope rows; the host filters by
+// its own scope inside Reconcile.
+func fetchPluginList(ctx context.Context, serverURL string) ([]protocol.Plugin, error) {
+	url := fmt.Sprintf("http://%s/api/plugins", serverURL)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("status %d: %s", resp.StatusCode, body)
+	}
+	var plugins []protocol.Plugin
+	if err := json.NewDecoder(resp.Body).Decode(&plugins); err != nil {
+		return nil, err
+	}
+	return plugins, nil
+}
 
 func fetchEmployeeConfig(serverURL string, employeeID int64) (protocol.EmployeeConfig, error) {
 	url := fmt.Sprintf("http://%s/api/employees/%d", serverURL, employeeID)

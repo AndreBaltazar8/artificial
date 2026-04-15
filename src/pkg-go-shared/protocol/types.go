@@ -97,21 +97,33 @@ type ChannelMember struct {
 	JoinedAt    string `json:"joined_at"`
 }
 
-// Plugin represents an external go-plugin binary that workers load on
-// start. Workers register their MCP tools from each enabled plugin's
-// Tools() output at load time.
+// Plugin represents an external go-plugin binary that svc-artificial (or
+// optionally a worker) loads on start. The plugin's `Scope` decides who
+// owns the subprocess:
 //
-// The persisted columns (id, name, path, enabled, config, created_at)
-// come straight from the `plugins` table. The runtime fields
-// (LoadedInWorkers, Tools, Status, LastError) are populated from Hub
-// in-memory state aggregated from MsgWorkerPluginState reports, so they
-// reflect what's actually running right now — not what the DB says
-// should be running.
+//   - PluginScopeHost    — svc-artificial spawns the plugin once in its
+//     own process. Workers see the plugin's tools via the host tool list
+//     and call them over the hub WebSocket
+//     (MsgCallTool → MsgCallToolResult). Reloading the plugin only
+//     needs to happen on svc-artificial; every connected worker picks
+//     the new tool closures up automatically.
+//   - PluginScopeWorker  — every worker spawns its own copy of the
+//     plugin subprocess locally. Reserved for plugins that need
+//     per-worker state (PTY hooks, worker-local caches) or for local
+//     development, where shipping a new binary to svc-artificial
+//     before every test is too much ceremony.
+//
+// The persisted columns (id, name, path, enabled, scope, config,
+// created_at) come straight from the `plugins` table. The runtime
+// fields (LoadedInWorkers, Tools, Status, LastError) are populated
+// from Hub in-memory state aggregated from MsgWorkerPluginState reports
+// plus svc-artificial's own host pluginhost state.
 type Plugin struct {
 	ID        int64  `json:"id"`
 	Name      string `json:"name"`
 	Path      string `json:"path"`
 	Enabled   bool   `json:"enabled"`
+	Scope     string `json:"scope"` // PluginScopeHost (default) | PluginScopeWorker
 	Config    any    `json:"config,omitempty"` // parsed JSON
 	CreatedAt string `json:"created_at"`
 
@@ -120,6 +132,25 @@ type Plugin struct {
 	Tools           []string `json:"tools,omitempty"`
 	Status          string   `json:"status,omitempty"`     // enabled | disabled | error
 	LastError       string   `json:"last_error,omitempty"`
+}
+
+// Plugin scopes. A plugin row with scope="" is treated as PluginScopeHost
+// so pre-scope rows automatically get the new default on read.
+const (
+	PluginScopeHost   = "host"
+	PluginScopeWorker = "worker"
+)
+
+// NormalizePluginScope returns the canonical scope string. Empty and
+// unrecognised values fold to PluginScopeHost so the common case
+// "no scope column yet" behaves as "host-side plugin".
+func NormalizePluginScope(s string) string {
+	switch s {
+	case PluginScopeWorker:
+		return PluginScopeWorker
+	default:
+		return PluginScopeHost
+	}
 }
 
 // WorkerPluginState is the payload a worker sends to the server via

@@ -120,3 +120,59 @@ const (
 	MsgWorkerPluginState = "worker_plugin_state"
 	MsgPluginChanged     = "plugin_changed"
 )
+
+// WebSocket message types for host-scope plugin invocation
+// (worker ↔ server).
+//
+// MsgHostToolList: worker → server request. Worker asks svc-artificial
+// for the current list of host-scope tool descriptors so it can graft
+// them onto its local MCP server. Response payload is a marshalled
+// HostToolList carried in the reply's Data field (keyed by RequestID).
+//
+// MsgCallTool: worker → server request. Worker forwards an MCP
+// tool-call for a host-scope tool; svc-artificial routes it into the
+// correct plugin's Execute method and replies with MsgCallToolResult
+// using the same RequestID so the worker's pending-request map in
+// hub.Client can resolve the round trip.
+//
+// MsgCallToolResult: server → worker response. Data field carries a
+// marshalled CallToolResult.
+const (
+	MsgHostToolList   = "host_tool_list"
+	MsgCallTool       = "call_tool"
+	MsgCallToolResult = "call_tool_result"
+)
+
+// HostToolList is the response payload for MsgHostToolList. Tools are
+// returned as raw descriptors — the worker re-grafts them onto its MCP
+// server via RegisterPluginTools with a closure that issues MsgCallTool
+// via hub.Request.
+type HostToolList struct {
+	Tools []HostToolDescriptor `json:"tools"`
+}
+
+// HostToolDescriptor mirrors plugin.ToolDescriptor but is defined here
+// so protocol has no import on pkg-go-shared/plugin — protocol is the
+// wire format, the plugin package is the plugin-author SDK.
+// The two structs are kept field-for-field compatible, and the
+// conversion helpers live in pluginhost where both packages are
+// already imported.
+type HostToolDescriptor struct {
+	Name        string          `json:"name"`
+	Description string          `json:"description"`
+	InputSchema json.RawMessage `json:"input_schema"`
+	PluginName  string          `json:"plugin_name"`
+}
+
+// CallToolArgs is the request payload for MsgCallTool.
+type CallToolArgs struct {
+	ToolName string          `json:"tool_name"`
+	Args     json.RawMessage `json:"args,omitempty"`
+}
+
+// CallToolResult is the response payload for MsgCallToolResult.
+// Exactly one of Result or Error is set.
+type CallToolResult struct {
+	Result json.RawMessage `json:"result,omitempty"`
+	Error  string          `json:"error,omitempty"`
+}

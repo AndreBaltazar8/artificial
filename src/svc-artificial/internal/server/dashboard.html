@@ -391,6 +391,8 @@ main { flex: 1; display: flex; overflow: hidden; }
   <input id="pluginName" placeholder="harness">
   <label>Binary path <span style="font-size:9px;color:var(--text3)">(absolute)</span></label>
   <input id="pluginPath" placeholder="/absolute/path/to/plugin-binary">
+  <label>Scope <span style="font-size:9px;color:var(--text3)">(host: svc-artificial spawns once, workers reach it over the hub / worker: each worker spawns its own copy)</span></label>
+  <select id="pluginScope"><option value="host" selected>host (default)</option><option value="worker">worker</option></select>
   <label>Config JSON <span style="font-size:9px;color:var(--text3)">(optional)</span></label>
   <textarea id="pluginConfig" rows="4" placeholder='{"key":"value"}'></textarea>
   <div class="actions"><button class="btn" onclick="hideModal('pluginModal')">Cancel</button><button class="btn primary" onclick="registerPlugin()">Register</button></div>
@@ -1377,9 +1379,11 @@ function renderPlugins() {
     const statusText = p.status || (p.enabled ? 'enabled' : 'disabled');
     const loadedIn = typeof p.loaded_in_workers === 'number' ? `${p.loaded_in_workers} worker(s)` : '—';
     const tools = Array.isArray(p.tools) && p.tools.length ? p.tools.join(', ') : '—';
+    const scope = p.scope || 'host';
+    const scopeColor = scope === 'host' ? 'var(--blue)' : 'var(--amber)';
     return `<div class="project-card" style="margin-bottom:8px">
       <div class="project-header">
-        <h3>${escHtml(p.name)} <span style="color:${statusColor};font-size:10px">● ${escHtml(statusText)}</span></h3>
+        <h3>${escHtml(p.name)} <span style="color:${statusColor};font-size:10px">● ${escHtml(statusText)}</span> <span style="color:${scopeColor};font-size:10px;margin-left:6px">[${escHtml(scope)}]</span></h3>
         <div class="path">${escHtml(p.path || '')}</div>
         <div style="font-size:10px;color:var(--text3);margin-top:4px">loaded in: ${loadedIn} · tools: ${escHtml(tools)}</div>
         ${p.last_error ? `<div style="font-size:10px;color:var(--red);margin-top:4px">error: ${escHtml(p.last_error)}</div>` : ''}
@@ -1387,6 +1391,13 @@ function renderPlugins() {
       <div class="project-footer" style="gap:6px">
         <label style="font-size:11px;color:var(--text2);display:flex;align-items:center;gap:4px">
           <input type="checkbox" ${p.enabled ? 'checked' : ''} onchange="togglePlugin(${p.id}, this.checked)"> enabled
+        </label>
+        <label style="font-size:11px;color:var(--text2);display:flex;align-items:center;gap:4px">
+          scope
+          <select onchange="setPluginScope(${p.id}, this.value)" style="font-size:10px">
+            <option value="host" ${scope === 'host' ? 'selected' : ''}>host</option>
+            <option value="worker" ${scope === 'worker' ? 'selected' : ''}>worker</option>
+          </select>
         </label>
         <div style="flex:1"></div>
         <button class="btn" onclick="reloadPlugin(${p.id})">Reload</button>
@@ -1399,6 +1410,7 @@ function renderPlugins() {
 async function registerPlugin() {
   const name = document.getElementById('pluginName').value.trim();
   const path = document.getElementById('pluginPath').value.trim();
+  const scope = document.getElementById('pluginScope').value || 'host';
   const cfgRaw = document.getElementById('pluginConfig').value.trim();
   if (!name || !path) return;
   let config = null;
@@ -1406,7 +1418,7 @@ async function registerPlugin() {
     try { config = JSON.parse(cfgRaw); }
     catch (e) { alert('Config must be valid JSON'); return; }
   }
-  const body = { name, path, enabled: true, config };
+  const body = { name, path, scope, enabled: true, config };
   const res = await fetch('/api/plugins', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
   if (!res.ok) {
     const err = await res.json().catch(() => ({ error: 'unknown error' }));
@@ -1416,12 +1428,22 @@ async function registerPlugin() {
   hideModal('pluginModal');
   document.getElementById('pluginName').value = '';
   document.getElementById('pluginPath').value = '';
+  document.getElementById('pluginScope').value = 'host';
   document.getElementById('pluginConfig').value = '';
   loadPlugins();
 }
 
 async function togglePlugin(id, enabled) {
   await fetch(`/api/plugins/${id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled }) });
+  loadPlugins();
+}
+
+async function setPluginScope(id, scope) {
+  const res = await fetch(`/api/plugins/${id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ scope }) });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: 'unknown error' }));
+    alert(`Scope change failed: ${err.error || res.status}`);
+  }
   loadPlugins();
 }
 

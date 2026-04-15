@@ -59,8 +59,18 @@ func (s *Server) Run(ctx context.Context) error {
 	addr := fmt.Sprintf(":%d", s.Port)
 	srv := &http.Server{Addr: addr, Handler: s.Mux}
 
+	// Spawn every host-scope plugin before the first HTTP request lands
+	// so a worker connecting in the same tick sees a populated tool
+	// list. Non-fatal: a broken plugin is logged inside ReconcileHostPlugins
+	// and recorded in the host's errors map; the others still launch.
+	s.Hub.ReconcileHostPlugins(ctx)
+
 	go func() {
 		<-ctx.Done()
+		// Kill every host-scope plugin subprocess before the HTTP
+		// server tears down; otherwise the plugin binaries keep
+		// running as orphans of the hashicorp/go-plugin launcher.
+		s.Hub.ShutdownHostPlugins()
 		srv.Shutdown(context.Background())
 	}()
 

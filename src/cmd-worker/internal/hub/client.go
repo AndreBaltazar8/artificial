@@ -170,3 +170,9 @@ func (c *Client) Request(ctx context.Context, msg protocol.WSMessage) (protocol.
 
 // IsConnected returns whether the client is currently connected.
 func (c *Client) IsConnected() bool { return c.connected }
+
+// ServerURL returns the svc-artificial host:port this client dials.
+// Used by the plugin-reload path in main.go to re-fetch the plugin
+// list after an MsgPluginChanged without having to re-plumb the
+// serverURL flag through every handler.
+func (c *Client) ServerURL() string { return c.serverURL }

@@ -190,9 +190,7 @@ func (a *ACP) Start() error {
 	if a.hubClient != nil {
 		instructions := buildMCPInstructions(a.cfg.Nickname)
 		a.mcpSrv = mcpserver.New(a.cfg.Nickname, a.cfg.Role, a.cfg.ProjectID, a.hubClient, instructions)
-		if a.cfg.PluginHost != nil {
-			a.mcpSrv.RegisterPluginTools(a.cfg.PluginHost.Tools())
-		}
+		a.mcpSrv.RegisterPluginTools(combinedPluginTools(a.cfg))
 		port, err := a.mcpSrv.Start() // StreamableHTTP
 		if err != nil {
 			return fmt.Errorf("start mcp server: %w", err)
@@ -440,6 +438,16 @@ func (a *ACP) Stop() {
 		a.result = Result{ExitCode: 0}
 		close(a.done)
 	}
+}
+
+// ReloadPluginTools re-grafts plugin-contributed tools onto the live
+// MCP server after a pluginhost reload. See the Claude implementation
+// for the rationale.
+func (a *ACP) ReloadPluginTools() {
+	if a.mcpSrv == nil {
+		return
+	}
+	a.mcpSrv.RegisterPluginTools(combinedPluginTools(a.cfg))
 }
 
 // ── .cursor/mcp.json management ─────────────────────────────────────────

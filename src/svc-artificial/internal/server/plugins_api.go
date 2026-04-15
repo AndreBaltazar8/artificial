@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -35,6 +36,7 @@ type pluginCreateInput struct {
 	Name    string          `json:"name"`
 	Path    string          `json:"path"`
 	Enabled *bool           `json:"enabled,omitempty"`
+	Scope   string          `json:"scope,omitempty"`
 	Config  json.RawMessage `json:"config,omitempty"`
 }
 
@@ -68,7 +70,7 @@ func (s *Server) apiCreatePlugin(w http.ResponseWriter, r *http.Request) {
 		}
 		configJSON = string(in.Config)
 	}
-	p, err := s.DB.UpsertPlugin(in.Name, in.Path, enabled, configJSON)
+	p, err := s.DB.UpsertPlugin(in.Name, in.Path, enabled, in.Scope, configJSON)
 	if err != nil {
 		writeErr(w, 500, err.Error())
 		return
@@ -80,6 +82,7 @@ func (s *Server) apiCreatePlugin(w http.ResponseWriter, r *http.Request) {
 
 type pluginUpdateInput struct {
 	Enabled *bool           `json:"enabled,omitempty"`
+	Scope   *string         `json:"scope,omitempty"`
 	Config  json.RawMessage `json:"config,omitempty"`
 }
 
@@ -111,6 +114,13 @@ func (s *Server) apiUpdatePlugin(w http.ResponseWriter, r *http.Request) {
 	updated := current
 	if in.Enabled != nil {
 		updated, err = s.DB.SetPluginEnabled(id, *in.Enabled)
+		if err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
+	}
+	if in.Scope != nil {
+		updated, err = s.DB.SetPluginScope(id, *in.Scope)
 		if err != nil {
 			writeErr(w, 500, err.Error())
 			return
@@ -222,13 +232,22 @@ type pluginRuntimeLookup interface {
 }
 
 // broadcastPluginChanged notifies every connected worker that the
-// plugin list on the server has changed. Workers react by re-reading
-// /api/plugins and reconciling their pluginhost registry — loading
-// newly enabled plugins, stopping newly disabled ones.
+// plugin list on the server has changed and simultaneously reconciles
+// svc-artificial's own host-scope pluginhost. The two halves run
+// together because the plugin that just changed might live on either
+// side — host or worker — and the dashboard has no way to narrow the
+// broadcast. Workers react by re-reading /api/plugins and reconciling
+// their local worker-scope pluginhost; svc-artificial reconciles its
+// host-scope one in-process.
 func (s *Server) broadcastPluginChanged(name string) {
 	if s.Hub == nil {
 		return
 	}
+	// Reconcile host-scope first so the post-broadcast tool list the
+	// workers will fetch is already up to date — otherwise a worker
+	// could win the race with MsgHostToolList and see the pre-change
+	// tools.
+	s.Hub.ReconcileHostPlugins(context.Background())
 	s.Hub.broadcast(protocol.WSMessage{
 		Type: protocol.MsgPluginChanged,
 		Text: name,

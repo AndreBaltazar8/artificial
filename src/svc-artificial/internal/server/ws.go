@@ -13,6 +13,7 @@ import (
 	"sync"
 	"syscall"
 
+	"artificial.pt/pkg-go-shared/pluginhost"
 	"artificial.pt/pkg-go-shared/protocol"
 	"artificial.pt/svc-artificial/internal/db"
 
@@ -32,6 +33,7 @@ type Hub struct {
 	mu          sync.RWMutex
 	clients     map[string]*client // nick → client
 	pluginState *pluginStateStore  // aggregated plugin runtime state from worker reports
+	pluginHost  *pluginhost.Host   // host-scope plugins spawned in this process
 }
 
 // NewHub creates a new WebSocket hub.
@@ -41,6 +43,7 @@ func NewHub(database *db.DB, port int) *Hub {
 		port:        port,
 		clients:     make(map[string]*client),
 		pluginState: newPluginStateStore(),
+		pluginHost:  pluginhost.New(protocol.PluginScopeHost),
 	}
 }
 
@@ -183,6 +186,10 @@ func (h *Hub) handleMessage(ctx context.Context, c *client, msg protocol.WSMessa
 		}
 	case protocol.MsgWorkerPluginState:
 		h.handleWorkerPluginState(c, msg)
+	case protocol.MsgHostToolList:
+		h.handleHostToolList(c, msg)
+	case protocol.MsgCallTool:
+		h.handleCallTool(c, msg)
 	}
 }
 

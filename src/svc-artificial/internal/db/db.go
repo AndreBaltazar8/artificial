@@ -171,7 +171,17 @@ var migrations = []migration{
 			created_at  TEXT DEFAULT (datetime('now'))
 		);
 	`},
-	// -- future migrations go here as {3, `...`}, etc.
+	// Migration 3 adds the scope column so plugins can be either
+	// host-spawned (svc-artificial owns the subprocess, every worker
+	// reaches the plugin over the hub) or worker-spawned (each worker
+	// has its own local subprocess, reserved for plugins that need
+	// per-worker state). Existing rows default to "host" — that matches
+	// the architectural direction the refactor takes: the default home
+	// for any new plugin is svc-artificial.
+	{3, `
+		ALTER TABLE plugins ADD COLUMN scope TEXT NOT NULL DEFAULT 'host';
+	`},
+	// -- future migrations go here as {4, `...`}, etc.
 }
 
 func now() string { return time.Now().UTC().Format(time.DateTime) }
@@ -1172,7 +1182,7 @@ func (d *DB) GetWorkerLogs(workerID int64) ([]WorkerLog, error) {
 // ListPlugins returns every plugin row, ordered by name.
 func (d *DB) ListPlugins() ([]protocol.Plugin, error) {
 	rows, err := d.db.Query(
-		`SELECT id, name, path, enabled, config_json, created_at FROM plugins ORDER BY name`,
+		`SELECT id, name, path, enabled, scope, config_json, created_at FROM plugins ORDER BY name`,
 	)
 	if err != nil {
 		return nil, err
@@ -1193,7 +1203,7 @@ func (d *DB) ListPlugins() ([]protocol.Plugin, error) {
 // id is unknown — callers should translate that to a 404.
 func (d *DB) GetPlugin(id int64) (protocol.Plugin, error) {
 	row := d.db.QueryRow(
-		`SELECT id, name, path, enabled, config_json, created_at FROM plugins WHERE id = ?`,
+		`SELECT id, name, path, enabled, scope, config_json, created_at FROM plugins WHERE id = ?`,
 		id,
 	)
 	return scanPlugin(row)
@@ -1204,7 +1214,7 @@ func (d *DB) GetPlugin(id int64) (protocol.Plugin, error) {
 // sql.ErrNoRows when the plugin is absent.
 func (d *DB) GetPluginByName(name string) (protocol.Plugin, error) {
 	row := d.db.QueryRow(
-		`SELECT id, name, path, enabled, config_json, created_at FROM plugins WHERE name = ?`,
+		`SELECT id, name, path, enabled, scope, config_json, created_at FROM plugins WHERE name = ?`,
 		name,
 	)
 	return scanPlugin(row)
@@ -1214,23 +1224,38 @@ func (d *DB) GetPluginByName(name string) (protocol.Plugin, error) {
 // already exists with the same name. Used by POST /api/plugins from the
 // dashboard. configJSON must be a valid JSON document or "{}" — an empty
 // string is normalised to "{}" to satisfy the NOT NULL constraint.
-func (d *DB) UpsertPlugin(name, path string, enabled bool, configJSON string) (protocol.Plugin, error) {
+// Empty scope folds to PluginScopeHost so the default new-plugin home
+// is svc-artificial.
+func (d *DB) UpsertPlugin(name, path string, enabled bool, scope, configJSON string) (protocol.Plugin, error) {
 	if configJSON == "" {
 		configJSON = "{}"
 	}
+	scope = protocol.NormalizePluginScope(scope)
 	enabledInt := 0
 	if enabled {
 		enabledInt = 1
 	}
 	_, err := d.db.Exec(
-		`INSERT INTO plugins (name, path, enabled, config_json) VALUES (?, ?, ?, ?)
-		 ON CONFLICT(name) DO UPDATE SET path = excluded.path, enabled = excluded.enabled, config_json = excluded.config_json`,
-		name, path, enabledInt, configJSON,
+		`INSERT INTO plugins (name, path, enabled, scope, config_json) VALUES (?, ?, ?, ?, ?)
+		 ON CONFLICT(name) DO UPDATE SET path = excluded.path, enabled = excluded.enabled, scope = excluded.scope, config_json = excluded.config_json`,
+		name, path, enabledInt, scope, configJSON,
 	)
 	if err != nil {
 		return protocol.Plugin{}, err
 	}
 	return d.GetPluginByName(name)
+}
+
+// SetPluginScope flips the scope between host and worker and returns
+// the updated row. Caller should broadcast MsgPluginChanged so both
+// svc-artificial's host loader and every worker re-reconcile their
+// local pluginhosts against the new scope column.
+func (d *DB) SetPluginScope(id int64, scope string) (protocol.Plugin, error) {
+	scope = protocol.NormalizePluginScope(scope)
+	if _, err := d.db.Exec(`UPDATE plugins SET scope = ? WHERE id = ?`, scope, id); err != nil {
+		return protocol.Plugin{}, err
+	}
+	return d.GetPlugin(id)
 }
 
 // SetPluginEnabled flips the enabled flag for a plugin. The dashboard
@@ -1275,12 +1300,14 @@ func scanPlugin(r interface {
 	var (
 		p          protocol.Plugin
 		enabledInt int
+		scope      string
 		configJSON string
 	)
-	if err := r.Scan(&p.ID, &p.Name, &p.Path, &enabledInt, &configJSON, &p.CreatedAt); err != nil {
+	if err := r.Scan(&p.ID, &p.Name, &p.Path, &enabledInt, &scope, &configJSON, &p.CreatedAt); err != nil {
 		return protocol.Plugin{}, err
 	}
 	p.Enabled = enabledInt == 1
+	p.Scope = protocol.NormalizePluginScope(scope)
 	if configJSON != "" && configJSON != "{}" {
 		// Best-effort parse — a malformed config does not stop us from
 		// returning the row; the dashboard renders it as a raw string.

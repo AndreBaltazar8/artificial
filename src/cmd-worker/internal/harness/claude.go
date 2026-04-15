@@ -34,9 +34,7 @@ func NewClaude(ctx context.Context, cfg Config, hubClient *hub.Client) *Claude {
 func (c *Claude) Start() error {
 	instructions := buildMCPInstructions(c.cfg.Nickname)
 	c.mcpSrv = mcpserver.New(c.cfg.Nickname, c.cfg.Role, c.cfg.ProjectID, c.hubClient, instructions)
-	if c.cfg.PluginHost != nil {
-		c.mcpSrv.RegisterPluginTools(c.cfg.PluginHost.Tools())
-	}
+	c.mcpSrv.RegisterPluginTools(combinedPluginTools(c.cfg))
 	mcpPort, err := c.mcpSrv.Start()
 	if err != nil {
 		return err
@@ -85,6 +83,24 @@ func (c *Claude) PushNotification(content string, meta map[string]string) {
 	if c.mcpSrv != nil {
 		c.mcpSrv.PushChannelNotification(content, meta)
 	}
+}
+
+// ReloadPluginTools re-grafts plugin-contributed tools onto the live
+// MCP server after a pluginhost reload. Combines worker-scope tools
+// (fresh closures from the local pluginhost) with host-scope tools
+// (freshly fetched from svc-artificial over the hub) and re-registers
+// the union with the MCP server. The MCP SDK's AddTool is
+// last-write-wins by name so every still-present tool handler is
+// replaced with a fresh closure — the previous closures could be
+// holding an already-killed go-plugin RPC client or referencing a
+// stale host-side plugin snapshot. See
+// handleHubMessage(MsgPluginChanged) in cmd/worker/main.go for the
+// call site.
+func (c *Claude) ReloadPluginTools() {
+	if c.mcpSrv == nil {
+		return
+	}
+	c.mcpSrv.RegisterPluginTools(combinedPluginTools(c.cfg))
 }
 
 // Wait blocks until Claude exits and returns the result.

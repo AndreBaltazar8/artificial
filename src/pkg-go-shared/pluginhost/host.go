@@ -1,42 +1,39 @@
-// Package pluginhost is the worker-side counterpart to
-// pkg-go-shared/plugin. It fetches the list of plugins from
-// svc-artificial, launches each enabled plugin as a subprocess via
-// hashicorp/go-plugin, and exposes the tools those plugins register for
-// grafting onto the worker's MCP server.
+// Package pluginhost spawns go-plugin binaries as subprocesses and
+// exposes their tool surface to whoever owns the Host — historically
+// cmd-worker, but after the host/worker scope split svc-artificial
+// owns the default host pluginhost and cmd-worker keeps only the
+// worker-scope subset.
 //
 // The host is deliberately thin: it does not know the names of any
 // specific tools, it does not validate schema semantics, and it does
 // not interpret Execute return values. Everything flows through as
-// opaque bytes from the plugin to the MCP server and back.
+// opaque bytes from the plugin to the caller and back.
 //
 // Lifecycle:
 //
-//  1. main() constructs a Host with the svc-artificial URL
-//  2. main() calls LoadAll(ctx) before starting the harness — each
-//     enabled plugin subprocess is spawned and its Tools() output is
-//     cached in the host's in-memory registry
-//  3. mcpserver reads Tools() off the host and registers one
-//     AddTool-per-descriptor on the MCP server, with a handler that
-//     routes the CallToolRequest args through Host.Execute into the
-//     owning plugin
-//  4. on shutdown, main() calls Shutdown to kill every plugin
-//     subprocess cleanly
+//  1. caller constructs a Host with the scope it owns ("host" for
+//     svc-artificial, "worker" for cmd-worker)
+//  2. caller fetches a plugin list from its source of truth (DB for
+//     svc-artificial, HTTP /api/plugins for cmd-worker) and calls
+//     Reconcile(ctx, plugins) — the Host filters by scope, spawns
+//     newly-enabled plugins, kills disappeared ones, and keeps its
+//     in-memory registry in sync
+//  3. caller uses Tools()/ExecuteByTool() to answer MCP-side calls
+//  4. on shutdown, caller calls Shutdown to kill every subprocess
+//     cleanly
 //
-// Reloads (MsgPluginChanged from the server) are handled by calling
-// LoadAll again; the host reconciles by stopping plugins that are
-// gone/disabled and starting newly-enabled ones.
+// Reloads (MsgPluginChanged from the server, Reload/Enable/Disable
+// from the dashboard) are handled by calling Reconcile again; the
+// host diffs the new list against the running set and only touches
+// what actually changed.
 package pluginhost
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"io"
 	"log/slog"
-	"net/http"
 	"os/exec"
 	"sync"
-	"time"
 
 	"artificial.pt/pkg-go-shared/plugin"
 	"artificial.pt/pkg-go-shared/protocol"
@@ -44,91 +41,94 @@ import (
 	goplugin "github.com/hashicorp/go-plugin"
 )
 
-// Host owns the set of currently-loaded plugins for one worker.
+// Host owns the set of currently-loaded plugins for one scope.
 //
 // Concurrency: every public method is safe to call from multiple
 // goroutines. The rwmutex (mu) guards the plugins + errors maps —
-// readers (Tools, Execute, State) take RLock, the LoadAll write path
-// takes Lock around the edits only. A separate mutex (loadMu) serialises
-// the full LoadAll call so two concurrent reloads cannot compute the
-// same toLaunch set and spawn duplicate subprocesses across the
-// unlocked spawn window.
+// readers (Tools, ExecuteByTool, State) take RLock, the Reconcile
+// write path takes Lock around the edits only. A separate mutex
+// (loadMu) serialises the full Reconcile call so two concurrent
+// reloads cannot compute the same toLaunch set and spawn duplicate
+// subprocesses across the unlocked spawn window.
 type Host struct {
-	serverURL string
+	scope string // PluginScopeHost or PluginScopeWorker
 
-	loadMu sync.Mutex // serialises LoadAll calls end-to-end
+	loadMu sync.Mutex // serialises Reconcile calls end-to-end
 
 	mu      sync.RWMutex
 	plugins map[string]*LoadedPlugin // name → plugin
-	errors  map[string]string         // name → load error message for disabled rows
+	errors  map[string]string        // name → load error message for disabled rows
 }
 
 // LoadedPlugin is one plugin that is currently running in a subprocess.
 //
-// tools is captured once at load time from plugin.Tools() and treated
+// Tools is captured once at load time from plugin.Tools() and treated
 // as immutable by the host — plugins cannot hot-swap their tool list
 // without being reloaded.
 type LoadedPlugin struct {
-	Name   string
-	Tools  []plugin.ToolDescriptor
-	Impl   plugin.ArtificialPlugin
+	Name  string
+	Tools []plugin.ToolDescriptor
+	Impl  plugin.ArtificialPlugin
 
-	client *goplugin.Client // go-plugin subprocess handle; nil before launch
+	client *goplugin.Client // go-plugin subprocess handle
 }
 
-// New constructs a Host. serverURL is the host:port of svc-artificial
-// — used to GET /api/plugins during LoadAll.
-func New(serverURL string) *Host {
+// New constructs a Host for a specific scope. The scope filter is
+// applied inside Reconcile: plugin rows with a different scope are
+// ignored, so the same plugin list can be fed to both a host-scope
+// and a worker-scope Host in different processes and each one loads
+// only its own subset.
+func New(scope string) *Host {
 	return &Host{
-		serverURL: serverURL,
-		plugins:   make(map[string]*LoadedPlugin),
-		errors:    make(map[string]string),
+		scope:   protocol.NormalizePluginScope(scope),
+		plugins: make(map[string]*LoadedPlugin),
+		errors:  make(map[string]string),
 	}
 }
 
-// LoadAll fetches the current plugin list from svc-artificial and
-// reconciles the host's loaded set against it. Enabled plugins that
-// aren't loaded yet are launched; loaded plugins that are no longer
-// present in the list are stopped; loaded plugins whose enabled flag
-// flipped off are stopped. Called at worker startup and again on every
-// MsgPluginChanged broadcast.
+// Scope returns the scope this host was constructed for.
+func (h *Host) Scope() string { return h.scope }
+
+// Reconcile reconciles the host's loaded set against `wantPlugins`.
+// Plugins whose scope doesn't match the host's own scope are ignored.
+// Enabled plugins that aren't loaded yet are launched; loaded plugins
+// that are no longer present in the list are stopped; loaded plugins
+// whose enabled flag flipped off are stopped. Called at caller startup
+// and again on every plugin-change event.
 //
-// Errors during the list fetch are fatal to the reconciliation (the
-// caller needs to know). Errors during individual plugin launches are
-// logged and recorded in the errors map — one broken plugin does not
-// block the others from loading.
+// Errors during individual plugin launches are logged and recorded in
+// the errors map — one broken plugin does not block the others from
+// loading.
 //
 // Locking: the write lock is released around the subprocess spawn so
 // concurrent Tools/State/Execute callers don't stall behind a slow
 // plugin launch. A spawn can take a second or two as go-plugin does
-// the handshake + RPC dial, and LoadAll is called from the hub
-// readLoop path which must not block the hub.
-func (h *Host) LoadAll(ctx context.Context) error {
-	// Serialise the whole LoadAll call. Two concurrent MsgPluginChanged
-	// broadcasts arriving while a LoadAll is mid-spawn would otherwise
+// the handshake + RPC dial, and Reconcile is typically called from a
+// hub readLoop goroutine which must not block the hub.
+func (h *Host) Reconcile(ctx context.Context, wantPlugins []protocol.Plugin) error {
+	// Serialise the whole Reconcile call. Two concurrent reload
+	// broadcasts arriving while a Reconcile is mid-spawn would otherwise
 	// compute the same toLaunch set and race on the commit
 	// — one subprocess would leak on the overwrite.
 	h.loadMu.Lock()
 	defer h.loadMu.Unlock()
 
-	plugins, err := h.fetchPluginList(ctx)
-	if err != nil {
-		return fmt.Errorf("fetch plugin list: %w", err)
-	}
-
-	want := make(map[string]protocol.Plugin, len(plugins))
-	for _, p := range plugins {
+	want := make(map[string]protocol.Plugin)
+	for _, p := range wantPlugins {
+		if protocol.NormalizePluginScope(p.Scope) != h.scope {
+			continue
+		}
 		if p.Enabled {
 			want[p.Name] = p
 		}
 	}
 
-	// Under lock: stop plugins we no longer want and compute
-	// the set of plugins still missing from the registry.
+	// Under lock: stop plugins we no longer want and compute the set
+	// of plugins still missing from the registry.
 	h.mu.Lock()
 	for name, loaded := range h.plugins {
 		if _, keep := want[name]; !keep {
-			slog.Info("pluginhost: stopping plugin", "name", name)
+			slog.Info("pluginhost: stopping plugin", "scope", h.scope, "name", name)
 			if loaded.client != nil {
 				loaded.client.Kill()
 			}
@@ -157,16 +157,16 @@ func (h *Host) LoadAll(ctx context.Context) error {
 	for _, p := range toLaunch {
 		loaded, err := h.launch(p)
 		if err != nil {
-			slog.Error("pluginhost: launch failed", "name", p.Name, "err", err)
+			slog.Error("pluginhost: launch failed", "scope", h.scope, "name", p.Name, "err", err)
 			launchErrors[p.Name] = err.Error()
 			continue
 		}
 		launched[p.Name] = loaded
-		slog.Info("pluginhost: plugin loaded", "name", p.Name, "tools", toolNames(loaded.Tools))
+		slog.Info("pluginhost: plugin loaded", "scope", h.scope, "name", p.Name, "tools", toolNames(loaded.Tools))
 	}
 
-	// Under lock: commit the launched plugins into the
-	// registry and update error bookkeeping atomically.
+	// Under lock: commit the launched plugins into the registry and
+	// update error bookkeeping atomically.
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	for name, loaded := range launched {
@@ -221,45 +221,16 @@ func (h *Host) launch(p protocol.Plugin) (*LoadedPlugin, error) {
 
 	tools := impl.Tools()
 	return &LoadedPlugin{
-		Name:   p.Name,
-		Tools:  tools,
-		Impl:   impl,
+		Name:  p.Name,
+		Tools: tools,
+		Impl:  impl,
 		client: client,
 	}, nil
 }
 
-// fetchHTTPClient is used by fetchPluginList. Has an explicit timeout
-// so a hung svc-artificial cannot wedge a worker indefinitely, even if
-// a caller passes ctx.Background() — the timeout is belt+braces on top
-// of the ctx deadline LoadAll already respects.
-var fetchHTTPClient = &http.Client{Timeout: 10 * time.Second}
-
-// fetchPluginList does one GET /api/plugins round-trip.
-func (h *Host) fetchPluginList(ctx context.Context) ([]protocol.Plugin, error) {
-	url := fmt.Sprintf("http://%s/api/plugins", h.serverURL)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return nil, err
-	}
-	resp, err := fetchHTTPClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("status %d: %s", resp.StatusCode, body)
-	}
-	var plugins []protocol.Plugin
-	if err := json.NewDecoder(resp.Body).Decode(&plugins); err != nil {
-		return nil, err
-	}
-	return plugins, nil
-}
-
-// Shutdown kills every plugin subprocess. Called from main() on worker
-// exit — tied into the same defer chain as the harness teardown.
-// Idempotent; calling Shutdown twice is a no-op on the second pass.
+// Shutdown kills every plugin subprocess. Called from main() on
+// worker/server exit. Idempotent; calling Shutdown twice is a no-op on
+// the second pass.
 func (h *Host) Shutdown() {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -278,7 +249,7 @@ func (h *Host) Shutdown() {
 type RegisteredTool struct {
 	PluginName string
 	Descriptor plugin.ToolDescriptor
-	Execute    func(argsJSON json.RawMessage) (json.RawMessage, error)
+	Execute    func(argsJSON []byte) ([]byte, error)
 }
 
 // Tools returns a flat list of every tool across every currently-loaded
@@ -299,7 +270,8 @@ func (h *Host) Tools() []RegisteredTool {
 		for _, desc := range loaded.Tools {
 			if prev, dup := seen[desc.Name]; dup {
 				slog.Warn("pluginhost: tool name collision",
-					"tool", desc.Name, "previous_plugin", prev, "new_plugin", loaded.Name)
+					"scope", h.scope, "tool", desc.Name,
+					"previous_plugin", prev, "new_plugin", loaded.Name)
 			}
 			seen[desc.Name] = loaded.Name
 
@@ -311,17 +283,36 @@ func (h *Host) Tools() []RegisteredTool {
 			out = append(out, RegisteredTool{
 				PluginName: loaded.Name,
 				Descriptor: desc,
-				Execute: func(argsJSON json.RawMessage) (json.RawMessage, error) {
-					result, err := owner.Impl.Execute(d.Name, []byte(argsJSON))
-					if err != nil {
-						return nil, err
-					}
-					return json.RawMessage(result), nil
+				Execute: func(argsJSON []byte) ([]byte, error) {
+					return owner.Impl.Execute(d.Name, argsJSON)
 				},
 			})
 		}
 	}
 	return out
+}
+
+// ExecuteByTool looks up a tool by name across every loaded plugin and
+// dispatches the call into the owning plugin's Execute. Used by the
+// svc-artificial side of the host-scope RPC path: the hub hands us a
+// tool name + raw args, we find the plugin that owns it, and we
+// return whatever bytes the plugin produces.
+//
+// Returns a typed error when the tool isn't registered so the caller
+// can translate it into an MsgCallToolResult error payload without
+// guessing at the wire format.
+func (h *Host) ExecuteByTool(toolName string, argsJSON []byte) ([]byte, error) {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+
+	for _, loaded := range h.plugins {
+		for _, desc := range loaded.Tools {
+			if desc.Name == toolName {
+				return loaded.Impl.Execute(toolName, argsJSON)
+			}
+		}
+	}
+	return nil, fmt.Errorf("pluginhost: no loaded plugin exposes tool %q", toolName)
 }
 
 // State returns a WorkerPluginState snapshot suitable for sending over
@@ -346,6 +337,30 @@ func (h *Host) State() protocol.WorkerPluginState {
 			Name:  name,
 			Error: errMsg,
 		})
+	}
+	return out
+}
+
+// HostToolDescriptors returns the plugin-contributed tools as protocol
+// wire descriptors, ready to send across MsgHostToolList. Only called
+// on the svc-artificial side — workers don't speak this directly.
+// Each descriptor carries its owning plugin name so the caller can
+// correlate MsgCallTool results with the plugin that served them, and
+// the dashboard can render "tool X from plugin Y" if it wants to.
+func (h *Host) HostToolDescriptors() []protocol.HostToolDescriptor {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+
+	var out []protocol.HostToolDescriptor
+	for _, loaded := range h.plugins {
+		for _, desc := range loaded.Tools {
+			out = append(out, protocol.HostToolDescriptor{
+				Name:        desc.Name,
+				Description: desc.Description,
+				InputSchema: desc.InputSchema,
+				PluginName:  loaded.Name,
+			})
+		}
 	}
 	return out
 }
