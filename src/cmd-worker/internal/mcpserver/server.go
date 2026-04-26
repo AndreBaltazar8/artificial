@@ -310,6 +310,10 @@ type spawnWorkerInput struct {
 	Nickname string `json:"nickname" jsonschema:"Nickname of the worker to spawn"`
 }
 
+type workerGrepInput struct {
+	Query string `json:"query" jsonschema:"Search query matched against worker nickname and role"`
+}
+
 type taskCreateInput struct {
 	Title       string `json:"title"       jsonschema:"Task title"`
 	Description string `json:"description,omitempty" jsonschema:"Task description"`
@@ -785,6 +789,75 @@ func (s *Server) registerTools() {
 			return textResult(msg), nil, nil
 		})
 	}
+
+	// ── Worker Query Tools (open to all roles) ──
+
+	gomcp.AddTool(s.mcpServer, &gomcp.Tool{
+		Name:        "worker_list",
+		Description: "List all employees with their online/offline status. Returns nickname, role, and whether the worker is currently connected.",
+	}, func(ctx context.Context, req *gomcp.CallToolRequest, _ struct{}) (*gomcp.CallToolResult, any, error) {
+		resp, err := s.hubClient.Request(ctx, protocol.WSMessage{Type: protocol.MsgWorkerList})
+		if err != nil {
+			return nil, nil, err
+		}
+		var entries []struct {
+			Nickname string `json:"nickname"`
+			Role     string `json:"role"`
+			Online   bool   `json:"online"`
+		}
+		if err := json.Unmarshal(resp.Data, &entries); err != nil {
+			return nil, nil, fmt.Errorf("decode worker_list: %w", err)
+		}
+		if len(entries) == 0 {
+			return textResult("no workers"), nil, nil
+		}
+		var lines string
+		for _, e := range entries {
+			state := "offline"
+			if e.Online {
+				state = "online"
+			}
+			lines += fmt.Sprintf("- %s (%s) — %s\n", e.Nickname, e.Role, state)
+		}
+		return textResult(fmt.Sprintf("%d worker(s):\n%s", len(entries), lines)), nil, nil
+	})
+
+	gomcp.AddTool(s.mcpServer, &gomcp.Tool{
+		Name:        "worker_grep",
+		Description: "Search workers by nickname or role. Returns matching entries with online/offline status.",
+	}, func(ctx context.Context, req *gomcp.CallToolRequest, input workerGrepInput) (*gomcp.CallToolResult, any, error) {
+		if input.Query == "" {
+			return nil, nil, fmt.Errorf("query required")
+		}
+		data, _ := json.Marshal(map[string]string{"query": input.Query})
+		resp, err := s.hubClient.Request(ctx, protocol.WSMessage{
+			Type: protocol.MsgWorkerGrep,
+			Data: data,
+		})
+		if err != nil {
+			return nil, nil, err
+		}
+		var entries []struct {
+			Nickname string `json:"nickname"`
+			Role     string `json:"role"`
+			Online   bool   `json:"online"`
+		}
+		if err := json.Unmarshal(resp.Data, &entries); err != nil {
+			return nil, nil, fmt.Errorf("decode worker_grep: %w", err)
+		}
+		if len(entries) == 0 {
+			return textResult("no matching workers"), nil, nil
+		}
+		var lines string
+		for _, e := range entries {
+			state := "offline"
+			if e.Online {
+				state = "online"
+			}
+			lines += fmt.Sprintf("- %s (%s) — %s\n", e.Nickname, e.Role, state)
+		}
+		return textResult(fmt.Sprintf("%d match(es):\n%s", len(entries), lines)), nil, nil
+	})
 
 	// ── Task Tools ──
 

@@ -89,6 +89,8 @@ const (
 const (
 	MsgFireWorker  = "fire_worker"
 	MsgSpawnWorker = "spawn_worker"
+	MsgWorkerList  = "worker_list"
+	MsgWorkerGrep  = "worker_grep"
 )
 
 // WebSocket message types for plugin CRUD (dashboard → server).

@@ -179,6 +179,10 @@ func (h *Hub) handleMessage(ctx context.Context, c *client, msg protocol.WSMessa
 		h.handleFireWorker(c, msg)
 	case protocol.MsgSpawnWorker:
 		h.handleSpawnWorker(c, msg)
+	case protocol.MsgWorkerList:
+		h.handleWorkerList(c, msg)
+	case protocol.MsgWorkerGrep:
+		h.handleWorkerGrep(c, msg)
 	case protocol.MsgWorkerTTYInput, protocol.MsgWorkerTTYResize:
 		// Forward directly to target worker — no broadcast
 		if msg.To != "" {
@@ -805,6 +809,99 @@ func (h *Hub) handleSpawnWorker(c *client, msg protocol.WSMessage) {
 		Type:      msg.Type,
 		RequestID: msg.RequestID,
 		Data:      json.RawMessage(data),
+	})
+}
+
+// ── Worker Queries (list/grep) ───────────────────────────────────────────
+
+// workerEntry is the slim shape returned by worker_list and worker_grep.
+// Intentionally minimal — nick/role/online is all commander asked for.
+type workerEntry struct {
+	Nickname string `json:"nickname"`
+	Role     string `json:"role"`
+	Online   bool   `json:"online"`
+}
+
+// listWorkerEntries builds the full worker roster with online state derived
+// from the hub's live client map — not the DB worker status, which can lag
+// behind process exits.
+func (h *Hub) listWorkerEntries() ([]workerEntry, error) {
+	emps, err := h.db.ListEmployees()
+	if err != nil {
+		return nil, err
+	}
+	h.mu.RLock()
+	online := make(map[string]bool, len(h.clients))
+	for nick := range h.clients {
+		online[nick] = true
+	}
+	h.mu.RUnlock()
+	out := make([]workerEntry, 0, len(emps))
+	for _, e := range emps {
+		out = append(out, workerEntry{
+			Nickname: e.Nickname,
+			Role:     e.Role,
+			Online:   online[e.Nickname],
+		})
+	}
+	return out, nil
+}
+
+func (h *Hub) handleWorkerList(c *client, msg protocol.WSMessage) {
+	entries, err := h.listWorkerEntries()
+	if err != nil {
+		h.sendTo(c.nick, protocol.WSMessage{
+			Type:      msg.Type,
+			RequestID: msg.RequestID,
+			Data:      json.RawMessage(fmt.Sprintf(`{"error":%q}`, err.Error())),
+		})
+		return
+	}
+	data, _ := json.Marshal(entries)
+	h.sendTo(c.nick, protocol.WSMessage{
+		Type:      msg.Type,
+		RequestID: msg.RequestID,
+		Data:      data,
+	})
+}
+
+func (h *Hub) handleWorkerGrep(c *client, msg protocol.WSMessage) {
+	var input struct {
+		Query string `json:"query"`
+	}
+	if msg.Data != nil {
+		json.Unmarshal(msg.Data, &input)
+	}
+	q := strings.ToLower(strings.TrimSpace(input.Query))
+	if q == "" {
+		h.sendTo(c.nick, protocol.WSMessage{
+			Type:      msg.Type,
+			RequestID: msg.RequestID,
+			Data:      json.RawMessage(`{"error":"query required"}`),
+		})
+		return
+	}
+	entries, err := h.listWorkerEntries()
+	if err != nil {
+		h.sendTo(c.nick, protocol.WSMessage{
+			Type:      msg.Type,
+			RequestID: msg.RequestID,
+			Data:      json.RawMessage(fmt.Sprintf(`{"error":%q}`, err.Error())),
+		})
+		return
+	}
+	matches := make([]workerEntry, 0)
+	for _, e := range entries {
+		if strings.Contains(strings.ToLower(e.Nickname), q) ||
+			strings.Contains(strings.ToLower(e.Role), q) {
+			matches = append(matches, e)
+		}
+	}
+	data, _ := json.Marshal(matches)
+	h.sendTo(c.nick, protocol.WSMessage{
+		Type:      msg.Type,
+		RequestID: msg.RequestID,
+		Data:      data,
 	})
 }
 
