@@ -93,17 +93,20 @@ func runTaskRunner(serverURL string, runnerID int64) {
 	// thinking (no checkpoints yet). Stops on runnerCtx cancel.
 	go runHeartbeatLoop(runnerCtx, serverURL, runnerID)
 
+	assignmentBrief := buildRunnerAssignmentBrief(cfg)
+
 	// MCP server registers the four runner tools with a Cancel hook
 	// pointing at runnerCancel — task_complete will fire it.
 	mcpInstructions := buildRunnerMCPInstructions(cfg)
 	mcpSrv = mcpserver.NewRunner(nick, hubClient, mcpInstructions, mcpserver.RunnerOptions{
-		RunnerID:     cfg.Runner.ID,
-		TaskID:       cfg.Task.ID,
-		TaskTitle:    cfg.Task.Title,
-		TaskDesc:     cfg.Task.Description,
-		WorktreePath: cfg.Runner.WorktreePath,
-		BranchName:   cfg.Runner.BranchName,
-		Cancel:       runnerCancel,
+		RunnerID:        cfg.Runner.ID,
+		TaskID:          cfg.Task.ID,
+		TaskTitle:       cfg.Task.Title,
+		TaskDesc:        cfg.Task.Description,
+		AssignmentBrief: assignmentBrief,
+		WorktreePath:    cfg.Runner.WorktreePath,
+		BranchName:      cfg.Runner.BranchName,
+		Cancel:          runnerCancel,
 	})
 	mcpPort, err := mcpSrv.Start()
 	if err != nil {
@@ -137,7 +140,7 @@ func runTaskRunner(serverURL string, runnerID int64) {
 	go hubClient.ConnectWithRetry(parentCtx)
 
 	persona := buildRunnerPersona(cfg)
-	initialPrompt := buildRunnerInitialPrompt(cfg)
+	initialPrompt := buildRunnerInitialPrompt(cfg, assignmentBrief)
 
 	// Pipe agent stream events to debug logs — same pattern as the
 	// regular worker harness; we don't repurpose them for anything
@@ -170,9 +173,9 @@ func runTaskRunner(serverURL string, runnerID int64) {
 		os.Exit(1)
 	}
 
-	// The initial prompt is the FIRST user-turn prompt passed to the
-	// selected harness. It tells the runner to call task_describe before
-	// doing any implementation work.
+	// The initial prompt is the first user-turn prompt passed to the
+	// selected harness. It includes the full task assignment so the
+	// runner can begin without a mandatory MCP round-trip.
 
 	// Wait for either the agent to exit on its own, or the MCP
 	// task_complete tool to cancel runnerCtx. Whichever fires first
@@ -509,7 +512,8 @@ func postRunnerStatus(serverURL string, runnerID int64, status, reason string) e
 
 // buildRunnerPersona is the system prompt for the ephemeral runner.
 // Deliberately stripped down — there is no team, no chat, no recovery
-// from past sessions. Just the assignment and the four runner tools.
+// from past sessions. Just the initial assignment and the four runner
+// tools.
 func buildRunnerPersona(cfg protocol.RunnerConfig) string {
 	projInfo := ""
 	if cfg.Project != nil && cfg.Project.Name != "" {
@@ -522,20 +526,22 @@ Branch: %s
 
 YOU HAVE NO CHAT. There are no teammates to message, no channels to join, no commander to ping. The only way you communicate with the rest of the system is through these four tools:
 
-  task_describe   — re-read the assignment any time
+  task_describe   — optionally re-read the assignment any time
   task_checkpoint — record progress after each milestone
   task_blocked    — escalate when stuck (blocks until manager replies)
   task_complete   — declare done; this terminates you
 
 Workflow:
-  1. Call task_describe FIRST to see your assignment. Read it carefully — the
+  1. Read the full task assignment in your initial prompt carefully — the
      "Acceptance criteria" section is the contract you have to satisfy.
-  2. Do the work using your standard tools (Read, Edit, Write, Bash, Grep, etc.).
-  3. After each meaningful unit of work, commit and call task_checkpoint.
-  4. Before declaring done, walk the Acceptance criteria one by one and
+  2. Use task_describe only if you need to re-read the assignment or recover
+     context later in the run.
+  3. Do the work using your standard tools (Read, Edit, Write, Bash, Grep, etc.).
+  4. After each meaningful unit of work, commit and call task_checkpoint.
+  5. Before declaring done, walk the Acceptance criteria one by one and
      confirm each is met. Run any builds/tests the criteria mention.
-  5. Commit your work to the runner branch with descriptive messages.
-  6. Call task_complete with a summary that names the commit hash(es) and
+  6. Commit your work to the runner branch with descriptive messages.
+  7. Call task_complete with a summary that names the commit hash(es) and
      restates which acceptance criteria were verified.
 
 Hard rules:
@@ -550,12 +556,88 @@ Hard rules:
 `, projInfo, cfg.Runner.WorktreePath, cfg.Runner.BranchName)
 }
 
-// buildRunnerInitialPrompt is the first user-turn message sent to
-// Claude after boot. Tells it to call task_describe immediately.
-func buildRunnerInitialPrompt(cfg protocol.RunnerConfig) string {
+// buildRunnerAssignmentBrief renders the task details once for both
+// the first user-turn prompt and the optional task_describe recovery
+// tool. Task.Description may already contain structured sections such
+// as Goal, Files in scope, Acceptance criteria, and Constraints, so it
+// is included verbatim.
+func buildRunnerAssignmentBrief(cfg protocol.RunnerConfig) string {
+	var b strings.Builder
+
+	fmt.Fprintf(&b, "Task #%d: %s\n\n", cfg.Task.ID, cfg.Task.Title)
+
+	b.WriteString("## Runner\n")
+	if cfg.Runner.Nickname != "" {
+		fmt.Fprintf(&b, "Nickname: %s\n", cfg.Runner.Nickname)
+	}
+	if cfg.Runner.ParentNick != "" {
+		fmt.Fprintf(&b, "Parent: %s\n", cfg.Runner.ParentNick)
+	}
+	fmt.Fprintf(&b, "Worktree: %s\n", cfg.Runner.WorktreePath)
+	fmt.Fprintf(&b, "Branch: %s\n", cfg.Runner.BranchName)
+	if cfg.Runner.BaseBranch != "" {
+		fmt.Fprintf(&b, "Base branch: %s\n", cfg.Runner.BaseBranch)
+	}
+
+	b.WriteString("\n## Project context\n")
+	if cfg.Project != nil {
+		if cfg.Project.ID != 0 {
+			fmt.Fprintf(&b, "ID: %d\n", cfg.Project.ID)
+		}
+		if cfg.Project.Name != "" {
+			fmt.Fprintf(&b, "Name: %s\n", cfg.Project.Name)
+		}
+		if cfg.Project.Path != "" {
+			fmt.Fprintf(&b, "Path: %s\n", cfg.Project.Path)
+		}
+		if cfg.Project.GitRemote != "" {
+			fmt.Fprintf(&b, "Git remote: %s\n", cfg.Project.GitRemote)
+		}
+	} else if cfg.Task.ProjectID != 0 {
+		fmt.Fprintf(&b, "Project ID: %d\n", cfg.Task.ProjectID)
+	} else {
+		b.WriteString("(No project record attached.)\n")
+	}
+
+	b.WriteString("\n## Task record\n")
+	if cfg.Task.Status != "" {
+		fmt.Fprintf(&b, "Status: %s\n", cfg.Task.Status)
+	}
+	if cfg.Task.Assignee != "" {
+		fmt.Fprintf(&b, "Assignee: %s\n", cfg.Task.Assignee)
+	}
+	if cfg.Task.ProjectID != 0 {
+		fmt.Fprintf(&b, "Project ID: %d\n", cfg.Task.ProjectID)
+	}
+	if cfg.Task.CreatedBy != "" {
+		fmt.Fprintf(&b, "Created by: %s\n", cfg.Task.CreatedBy)
+	}
+	if cfg.Task.CreatedAt != "" {
+		fmt.Fprintf(&b, "Created at: %s\n", cfg.Task.CreatedAt)
+	}
+	if cfg.Task.UpdatedAt != "" {
+		fmt.Fprintf(&b, "Updated at: %s\n", cfg.Task.UpdatedAt)
+	}
+
+	desc := cfg.Task.Description
+	b.WriteString("\n--- Description ---\n")
+	if strings.TrimSpace(desc) == "" {
+		b.WriteString("(No task description provided.)")
+	} else {
+		b.WriteString(desc)
+	}
+
+	return strings.TrimRight(b.String(), "\n")
+}
+
+// buildRunnerInitialPrompt is the first user-turn message sent to the
+// selected harness after boot. It carries the complete task assignment
+// so the runner can start work immediately; task_describe remains
+// available only as an optional re-read/recovery tool.
+func buildRunnerInitialPrompt(cfg protocol.RunnerConfig, assignmentBrief string) string {
 	return fmt.Sprintf(
-		"You are runner %s, assigned to task #%d. Call task_describe now to read your assignment, then do the work.",
-		cfg.Runner.Nickname, cfg.Task.ID,
+		"You are runner %s, assigned to task #%d. The full assignment is below; start implementation from these details. Use task_describe only if you need to re-read or recover the assignment later.\n\n%s\n\nBegin work now. Verify every acceptance criterion before calling task_complete.",
+		cfg.Runner.Nickname, cfg.Task.ID, assignmentBrief,
 	)
 }
 

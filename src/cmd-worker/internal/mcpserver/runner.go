@@ -17,10 +17,10 @@ import (
 // exposes a small, task-focused tool set instead of the full chat /
 // task / review surface that long-lived workers get. Tools available:
 //
-//   task_describe   — read the assignment (title + description).
-//   task_checkpoint — record incremental progress; bumps liveness.
-//   task_blocked    — escalate to the manager when stuck.
-//   task_complete   — declare done, triggers the runner to exit.
+//	task_describe   — optionally re-read the assignment.
+//	task_checkpoint — record incremental progress; bumps liveness.
+//	task_blocked    — escalate to the manager when stuck.
+//	task_complete   — declare done, triggers the runner to exit.
 //
 // Notably absent: chat_*, join/leave, set_topic, task_create,
 // commander_review. A runner that wants to talk to a human has exactly
@@ -28,13 +28,14 @@ import (
 // finish has exactly one — task_complete. That's the whole point of
 // the manager/runner split.
 type RunnerOptions struct {
-	RunnerID    int64              // task_runners.id, surfaced in WS payloads
-	TaskID      int64              // tasks.id this runner owns
-	TaskTitle   string             // for task_describe
-	TaskDesc    string             // for task_describe
-	WorktreePath string            // for task_describe
-	BranchName   string            // for task_describe
-	Cancel      context.CancelFunc // called by task_complete; cmd-worker main waits on this
+	RunnerID        int64              // task_runners.id, surfaced in WS payloads
+	TaskID          int64              // tasks.id this runner owns
+	TaskTitle       string             // for task_describe fallback
+	TaskDesc        string             // for task_describe fallback
+	AssignmentBrief string             // rendered initial assignment, reused by task_describe
+	WorktreePath    string             // for task_describe
+	BranchName      string             // for task_describe
+	Cancel          context.CancelFunc // called by task_complete; cmd-worker main waits on this
 }
 
 // NewRunner is the runner-mode counterpart to New. Same MCP plumbing
@@ -94,13 +95,9 @@ func registerRunnerTools(s *Server, opts RunnerOptions) {
 	gomcp.AddTool(s.mcpServer, &gomcp.Tool{
 		Name: "task_describe",
 		Description: "Return the assignment for this runner: task title, description, " +
-			"worktree path, and branch name. Call this first before doing any work.",
+			"project context, worktree path, and branch name. Optional re-read/recovery tool.",
 	}, func(ctx context.Context, req *gomcp.CallToolRequest, _ struct{}) (*gomcp.CallToolResult, any, error) {
-		text := fmt.Sprintf(
-			"Task #%d: %s\n\nWorktree: %s\nBranch: %s\n\n--- Description ---\n%s",
-			opts.TaskID, opts.TaskTitle, opts.WorktreePath, opts.BranchName, opts.TaskDesc,
-		)
-		return textResult(text), nil, nil
+		return textResult(runnerAssignmentText(opts)), nil, nil
 	})
 
 	gomcp.AddTool(s.mcpServer, &gomcp.Tool{
@@ -179,6 +176,16 @@ func registerRunnerTools(s *Server, opts RunnerOptions) {
 		})
 		return textResult("task complete — runner exiting"), nil, nil
 	})
+}
+
+func runnerAssignmentText(opts RunnerOptions) string {
+	if opts.AssignmentBrief != "" {
+		return opts.AssignmentBrief
+	}
+	return fmt.Sprintf(
+		"Task #%d: %s\n\nWorktree: %s\nBranch: %s\n\n--- Description ---\n%s",
+		opts.TaskID, opts.TaskTitle, opts.WorktreePath, opts.BranchName, opts.TaskDesc,
+	)
 }
 
 // textResult is duplicated from server.go's helper rather than
