@@ -165,6 +165,42 @@ type WorkerPluginState struct {
 	Plugins []LoadedPlugin `json:"plugins"`
 }
 
+// Runner status values. Runners are ephemeral — once they reach
+// "complete", "blocked", or "crashed" they are not re-used; if a task
+// needs more work, a fresh runner is spawned.
+const (
+	RunnerStatusRunning   = "running"
+	RunnerStatusBlocked   = "blocked"
+	RunnerStatusComplete  = "complete"
+	RunnerStatusCrashed   = "crashed"
+	RunnerStatusCancelled = "cancelled"
+)
+
+// TaskRunner represents an ephemeral cmd-worker process that has been
+// spawned to drive a single task to completion on a dedicated git
+// worktree. Runners are not employees — they don't persist, don't join
+// chat channels, and don't accept work outside their assigned task. The
+// lifecycle is: spawn (status=running) → progress checkpoints → exit
+// (complete | blocked | crashed | cancelled).
+type TaskRunner struct {
+	ID            int64  `json:"id"`
+	TaskID        int64  `json:"task_id"`
+	Nickname      string `json:"nickname"`
+	ParentNick    string `json:"parent_nick,omitempty"` // manager-worker who owns this runner, blank if commander-spawned
+	PID           int    `json:"pid"`
+	Status        string `json:"status"` // running, blocked, complete, crashed, cancelled
+	WorktreePath  string `json:"worktree_path"`
+	BranchName    string `json:"branch_name"`
+	BaseBranch    string `json:"base_branch,omitempty"`
+	HarnessInUse  bool   `json:"harness_in_use,omitempty"` // whether the runner is currently driving the dev harness
+	LastSummary   string `json:"last_summary,omitempty"`   // most recent checkpoint or final summary
+	BlockedReason string `json:"blocked_reason,omitempty"`
+	LogPath       string `json:"log_path,omitempty"`
+	StartedAt     string `json:"started_at"`
+	LastHeartbeat string `json:"last_heartbeat,omitempty"`
+	FinishedAt    string `json:"finished_at,omitempty"`
+}
+
 // LoadedPlugin is a single entry in WorkerPluginState.Plugins.
 //
 // Error is non-empty only when the plugin failed to load on this worker

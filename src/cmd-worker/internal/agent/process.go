@@ -29,6 +29,8 @@ type Config struct {
 	Returning            bool     // True if this agent has been spawned before
 	ResumeSessionID      string   // If set, resume this Claude session instead of starting fresh
 	CompanyKnowledgePath string   // Path to company knowledge directory (optional)
+	InitialPrompt        string   // If set, used as the positional first user-turn prompt instead of the default introduce-yourself / returning-online prompts. Used by ephemeral task runners.
+	SkipChatPrelude      bool     // If true, omit the "You are part of a team / your channels are" team-communication block from the system prompt. Used by runners which have no chat surface.
 }
 
 // Result holds the result of a Claude agent run.
@@ -77,7 +79,8 @@ func Start(ctx context.Context, cfg Config, events chan<- StreamEvent) (*Process
 		channelList = strings.Join(cfg.Channels, ", ")
 	}
 
-	systemPrompt += fmt.Sprintf(`
+	if !cfg.SkipChatPrelude {
+		systemPrompt += fmt.Sprintf(`
 
 ## Team Communication
 
@@ -87,6 +90,7 @@ Your nickname is "%s". Use the chat tools to communicate with the team.
 You are a member of these channels: %s
 You do NOT need to call join_channel for these — you are already a member.
 `, cfg.Nickname, channelList)
+	}
 
 	if cfg.CompanyKnowledgePath != "" {
 		systemPrompt += fmt.Sprintf(`
@@ -103,7 +107,11 @@ This contains critical information about CLI tools, deployment workflows, and co
 	)
 
 	var initialPrompt string
-	if cfg.Returning {
+	if cfg.InitialPrompt != "" {
+		// Caller-supplied prompt — used by task runners and any future
+		// agent type that needs a non-default first user turn.
+		initialPrompt = cfg.InitialPrompt
+	} else if cfg.Returning {
 		initialPrompt = fmt.Sprintf(
 			"You are back online as %s. You have been here before — do NOT re-introduce yourself. "+
 				"Just check for any new messages or tasks. Your channels: %s. "+
@@ -194,15 +202,39 @@ This contains critical information about CLI tools, deployment workflows, and co
 		p.parseDone <- parseOutput{result: pr, err: err}
 	}()
 
-	// Accept the dev channel confirmation dialog by sending Enter via PTY.
-	// Claude stays alive in interactive mode, receiving channel notifications via MCP SSE.
+	// Dismiss bootup dialogs by sending Enter multiple times. There are
+	// up to two prompts the agent never wants to interact with:
+	//   1. "Trust this folder" — appears for any path Claude hasn't seen.
+	//      The runner case ALWAYS hits this (every worktree is new); the
+	//      regular worker case hits it on first launch in a path.
+	//   2. "Loading development channels" — appears every launch because
+	//      we pass --dangerously-load-development-channels.
+	// Sending Enter at +3s and +6s dismisses both. Once Claude reaches the
+	// real chat prompt, extra Enters become empty submits which Claude
+	// silently ignores.
 	go func() {
-		time.Sleep(3 * time.Second)
-		slog.Info("sending Enter to accept dev channel dialog")
+		select {
+		case <-time.After(3 * time.Second):
+		case <-ctx.Done():
+			return
+		}
+		slog.Info("sending Enter to accept first bootup dialog (trust folder / dev channels)")
+		ptmx.Write([]byte{'\r'})
+
+		select {
+		case <-time.After(3 * time.Second):
+		case <-ctx.Done():
+			return
+		}
+		slog.Info("sending Enter to accept second bootup dialog (dev channels if trust appeared first)")
 		ptmx.Write([]byte{'\r'})
 
 		// Try to discover session ID from ~/.claude/sessions/<pid>.json
-		time.Sleep(5 * time.Second)
+		select {
+		case <-time.After(2 * time.Second):
+		case <-ctx.Done():
+			return
+		}
 		p.discoverSession(cmd.Process.Pid, cfg.ProjectPath)
 	}()
 

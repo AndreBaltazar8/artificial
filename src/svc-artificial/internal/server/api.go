@@ -84,6 +84,8 @@ func (s *Server) registerAPI() {
 	s.Mux.HandleFunc("PATCH /api/plugins/{id}", s.apiUpdatePlugin)
 	s.Mux.HandleFunc("POST /api/plugins/{id}/reload", s.apiReloadPlugin)
 	s.Mux.HandleFunc("DELETE /api/plugins/{id}", s.apiDeletePlugin)
+
+	s.registerRunnerAPI()
 }
 
 func writeJSON(w http.ResponseWriter, v any) {
@@ -499,23 +501,11 @@ func (s *Server) apiSpawnWorker(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Find the worker binary
+	// Find the worker binary (sibling first, then PATH; supports both
+	// `cmd-worker` and `worker` names — see findWorkerBin).
 	workerBin := s.WorkerBin
 	if workerBin == "" {
-		// Try to find it next to the current binary
-		self, _ := os.Executable()
-		if self != "" {
-			candidate := self[:len(self)-len("svc-artificial")] + "cmd-worker"
-			if _, err := os.Stat(candidate); err == nil {
-				workerBin = candidate
-			}
-		}
-	}
-	if workerBin == "" {
-		// Try PATH
-		if p, err := exec.LookPath("cmd-worker"); err == nil {
-			workerBin = p
-		}
+		workerBin = findWorkerBin()
 	}
 	if workerBin == "" {
 		writeErr(w, 500, "cmd-worker binary not found; set --worker-bin flag")
@@ -795,10 +785,23 @@ func (s *Server) apiUpdateTask(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "invalid json")
 		return
 	}
+	prev, _ := s.DB.GetTask(id)
 	task, err := s.DB.UpdateTask(id, input.Status, input.Assignee)
 	if err != nil {
 		writeErr(w, 500, err.Error())
 		return
+	}
+	// Auto-spawn a runner the moment a task transitions into
+	// in_progress. If a runner already exists for this task (manager
+	// pre-spawned, dashboard race) spawnRunnerForTask returns an
+	// error which we log but don't surface — the task update itself
+	// succeeded, the runner spawn is best-effort.
+	if input.Status != nil && *input.Status == "in_progress" && prev.Status != "in_progress" {
+		go func(taskID int64, parent string) {
+			if _, err := s.spawnRunnerForTask(taskID, parent); err != nil {
+				slog.Info("auto-spawn runner skipped or failed", "task_id", taskID, "err", err)
+			}
+		}(id, task.Assignee)
 	}
 	writeJSON(w, task)
 }
@@ -971,7 +974,7 @@ func (s *Server) apiRecruitAccept(w http.ResponseWriter, r *http.Request) {
 	if workerBin == "" {
 		self, _ := os.Executable()
 		if self != "" {
-			candidate := self[:len(self)-len("svc-artificial")] + "cmd-worker"
+			candidate := filepath.Join(filepath.Dir(self), "cmd-worker")
 			if _, err := os.Stat(candidate); err == nil {
 				workerBin = candidate
 			}
@@ -1059,6 +1062,18 @@ func (s *Server) apiRespondToReview(w http.ResponseWriter, r *http.Request) {
 		Type: protocol.MsgReviewResponded,
 		Data: data,
 	})
+	// For runner-originated reviews, also push the response into the
+	// runner's channel-notification stream as a MsgWorkerNotify. The
+	// runner's hub handler routes that into Claude as a directive,
+	// which is the only way the ephemeral runner can hear back from
+	// the manager (it has no chat surface).
+	if strings.HasPrefix(review.Type, "runner_") {
+		s.Hub.sendTo(review.WorkerNick, protocol.WSMessage{
+			Type: protocol.MsgWorkerNotify,
+			From: "manager",
+			Text: input.Response,
+		})
+	}
 	s.Hub.broadcast(protocol.WSMessage{
 		Type: protocol.MsgReviewResponded,
 		Data: data,

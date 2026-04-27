@@ -11,6 +11,49 @@ type EmployeeConfig struct {
 	CompanyKnowledgePath string   `json:"company_knowledge_path,omitempty"` // path to company knowledge directory
 }
 
+// RunnerConfig is returned by GET /api/runners/{id}/config so the
+// cmd-worker booting in --task-runner mode has everything it needs
+// without going through employee-config: the task to work on, the
+// worktree it should `cd` into, the branch it should commit to, and
+// the parent worker (manager) that should hear runner messages.
+type RunnerConfig struct {
+	Runner     TaskRunner `json:"runner"`
+	Task       Task       `json:"task"`
+	Project    *Project   `json:"project,omitempty"`
+	ServerAddr string     `json:"server_addr"`
+}
+
+// RunnerCheckpointPayload is the body of MsgRunnerCheckpoint and the
+// /api/runners/{id}/checkpoint POST endpoint. Lets the runner record
+// progress in a structured way without needing chat — useful both as a
+// crash-safe "what was I doing" log and as a place for the manager UI
+// to surface incremental work.
+type RunnerCheckpointPayload struct {
+	Summary    string   `json:"summary"`
+	Commits    []string `json:"commits,omitempty"`
+	FilesTouched []string `json:"files_touched,omitempty"`
+}
+
+// RunnerCompletePayload is the body of MsgRunnerComplete and the
+// /api/runners/{id}/complete POST endpoint. The runner emits this when
+// its work is finished and committed; the server marks the runner
+// terminal, optionally moves the task to in_qa, and notifies the
+// manager so it can review the branch.
+type RunnerCompletePayload struct {
+	Summary    string   `json:"summary"`
+	BranchName string   `json:"branch_name,omitempty"`
+	Commits    []string `json:"commits,omitempty"`
+}
+
+// RunnerBlockedPayload is the body of MsgRunnerBlocked and the
+// /api/runners/{id}/blocked POST endpoint. Used when the runner can't
+// make progress on its own — e.g. ambiguous spec, missing credentials,
+// failing test it can't diagnose. Surfaces in the manager dashboard.
+type RunnerBlockedPayload struct {
+	Reason   string `json:"reason"`
+	Question string `json:"question,omitempty"`
+}
+
 // DMChannelName returns the canonical DM channel name for two nicknames.
 // Nicks are sorted alphabetically so dm:alice:bob == dm:bob:alice.
 func DMChannelName(a, b string) string {

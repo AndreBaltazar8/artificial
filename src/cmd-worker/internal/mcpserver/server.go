@@ -315,9 +315,78 @@ type workerGrepInput struct {
 }
 
 type taskCreateInput struct {
-	Title       string `json:"title"       jsonschema:"Task title"`
-	Description string `json:"description,omitempty" jsonschema:"Task description"`
-	Assignee    string `json:"assignee,omitempty"    jsonschema:"Assignee nickname (optional)"`
+	Title       string `json:"title"       jsonschema:"Short imperative title — 'Add login-shed jitter sleep' not 'login fix'."`
+	Description string `json:"description,omitempty" jsonschema:"Free-form description. Prefer the structured fields below; this is a fallback when goal/context/acceptance_criteria don't fit."`
+	Assignee    string `json:"assignee,omitempty"    jsonschema:"Assignee nickname. Leave empty if a runner will pick this up."`
+
+	// Structured fields. When any are set, the description is rendered
+	// from them as markdown so a runner reading task_describe sees a
+	// predictable shape every time. Spec the work like a one-page brief
+	// so the runner can execute autonomously without needing to come
+	// back with task_blocked.
+	Goal                string   `json:"goal,omitempty"                 jsonschema:"What outcome this task achieves, one sentence. The runner uses this to decide if its work matches the intent."`
+	Context             string   `json:"context,omitempty"              jsonschema:"Background a runner needs that isn't obvious from the code: why this matters, prior incidents, related decisions."`
+	AcceptanceCriteria  []string `json:"acceptance_criteria,omitempty"  jsonschema:"Concrete pass/fail bullets. The runner MUST verify each one before calling task_complete. e.g. 'svc-gapi build passes', 'login-shed path sleeps 80–220ms'."`
+	Constraints         []string `json:"constraints,omitempty"          jsonschema:"Hard rules: scope limits, files to avoid, perf/security guarantees that must hold. e.g. 'do not change request body shape', 'no new dependencies'."`
+	Files               []string `json:"files,omitempty"                jsonschema:"Optional pointers to files the runner will likely touch — saves it the discovery round-trip."`
+}
+
+// renderTaskDescription assembles the structured fields of taskCreateInput
+// into a markdown task brief. If only the freeform Description was set,
+// it is returned verbatim. If structured fields are present, Description
+// is appended under a "Notes" section so nothing the manager wrote is
+// silently dropped.
+func renderTaskDescription(in taskCreateInput) string {
+	hasStructured := in.Goal != "" || in.Context != "" ||
+		len(in.AcceptanceCriteria) > 0 || len(in.Constraints) > 0 || len(in.Files) > 0
+	if !hasStructured {
+		return in.Description
+	}
+	var b strings.Builder
+	if in.Goal != "" {
+		b.WriteString("## Goal\n")
+		b.WriteString(in.Goal)
+		b.WriteString("\n\n")
+	}
+	if in.Context != "" {
+		b.WriteString("## Context\n")
+		b.WriteString(in.Context)
+		b.WriteString("\n\n")
+	}
+	if len(in.Files) > 0 {
+		b.WriteString("## Files in scope\n")
+		for _, f := range in.Files {
+			b.WriteString("- `")
+			b.WriteString(f)
+			b.WriteString("`\n")
+		}
+		b.WriteString("\n")
+	}
+	if len(in.AcceptanceCriteria) > 0 {
+		b.WriteString("## Acceptance criteria\n")
+		b.WriteString("Verify each before calling task_complete:\n")
+		for _, c := range in.AcceptanceCriteria {
+			b.WriteString("- [ ] ")
+			b.WriteString(c)
+			b.WriteString("\n")
+		}
+		b.WriteString("\n")
+	}
+	if len(in.Constraints) > 0 {
+		b.WriteString("## Constraints\n")
+		for _, c := range in.Constraints {
+			b.WriteString("- ")
+			b.WriteString(c)
+			b.WriteString("\n")
+		}
+		b.WriteString("\n")
+	}
+	if in.Description != "" {
+		b.WriteString("## Notes\n")
+		b.WriteString(in.Description)
+		b.WriteString("\n")
+	}
+	return strings.TrimRight(b.String(), "\n")
 }
 
 type taskUpdateInput struct {
@@ -862,15 +931,20 @@ func (s *Server) registerTools() {
 	// ── Task Tools ──
 
 	gomcp.AddTool(s.mcpServer, &gomcp.Tool{
-		Name:        "task_create",
-		Description: "Create a new task. Tasks are always tied to the current project.",
+		Name: "task_create",
+		Description: "Create a new task in the current project. " +
+			"Tasks may be picked up by a runner (autonomous, ephemeral Claude in an isolated worktree) — write the spec accordingly. " +
+			"Prefer the structured fields (goal, context, acceptance_criteria, constraints, files) over raw description: " +
+			"the runner reads task_describe with no other context and must be able to execute and self-verify from this alone. " +
+			"At minimum, every task should have acceptance_criteria — concrete pass/fail bullets the runner checks before calling task_complete.",
 	}, func(ctx context.Context, req *gomcp.CallToolRequest, input taskCreateInput) (*gomcp.CallToolResult, any, error) {
 		if input.Title == "" {
 			return nil, nil, fmt.Errorf("title required")
 		}
+		description := renderTaskDescription(input)
 		data, _ := json.Marshal(map[string]any{
 			"title":       input.Title,
-			"description": input.Description,
+			"description": description,
 			"assignee":    input.Assignee,
 			"project_id":  s.projectID,
 		})

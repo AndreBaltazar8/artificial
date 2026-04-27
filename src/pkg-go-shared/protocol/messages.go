@@ -93,6 +93,28 @@ const (
 	MsgWorkerGrep  = "worker_grep"
 )
 
+// WebSocket message types for ephemeral task runners — short-lived
+// agent processes that own a single task on its own git worktree, work
+// without joining chat channels, and self-exit on completion. They
+// reuse the cmd-worker binary in `--task-runner` mode but don't appear
+// in the employees table; their lifecycle is tracked in task_runners.
+//
+// runner → server:
+//   MsgRunnerCheckpoint: progress signal (commit hash, summary).
+//   MsgRunnerBlocked:    runner needs human/manager input; surfaces in dashboard.
+//   MsgRunnerComplete:   work is done, branch committed; runner will exit.
+//
+// server → manager (the worker that owns the task or commander):
+//   MsgRunnerSpawned:    a runner has been spawned for a task.
+//   MsgRunnerStatus:     state changed (running, blocked, complete, crashed).
+const (
+	MsgRunnerCheckpoint = "runner_checkpoint"
+	MsgRunnerBlocked    = "runner_blocked"
+	MsgRunnerComplete   = "runner_complete"
+	MsgRunnerSpawned    = "runner_spawned"
+	MsgRunnerStatus     = "runner_status"
+)
+
 // WebSocket message types for plugin CRUD (dashboard → server).
 //
 // CRUD goes over WS rather than REST to match the pattern used by tasks

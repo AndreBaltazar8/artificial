@@ -401,7 +401,7 @@ main { flex: 1; display: flex; overflow: hidden; }
 
 <!-- Task Detail Modal -->
 <div class="modal-overlay" id="taskDetailModal">
-<div class="modal" style="min-width:500px;max-width:700px">
+<div class="modal" style="min-width:500px;max-width:760px">
   <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px">
     <h2 id="taskDetailTitle" style="flex:1;margin:0"></h2>
     <span id="taskDetailStatus" style="font-size:10px;padding:2px 8px;border-radius:4px;background:var(--bg3)"></span>
@@ -409,8 +409,15 @@ main { flex: 1; display: flex; overflow: hidden; }
   <div style="font-size:11px;color:var(--text3);margin-bottom:8px">
     <span id="taskDetailMeta"></span>
   </div>
-  <div id="taskDetailDesc" style="font-size:12px;line-height:1.6;color:var(--text2);max-height:400px;overflow-y:auto"></div>
-  <div class="actions"><button class="btn" onclick="hideModal('taskDetailModal')">Close</button></div>
+  <div id="taskDetailDesc" style="font-size:12px;line-height:1.6;color:var(--text2);max-height:300px;overflow-y:auto;margin-bottom:12px"></div>
+  <div style="border-top:1px solid var(--bg3);padding-top:10px;margin-top:8px">
+    <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+      <strong style="font-size:11px;text-transform:uppercase;color:var(--text2)">Runners</strong>
+      <button class="btn" id="taskDetailSpawnBtn" style="font-size:10px;padding:2px 8px" onclick="spawnRunnerForCurrentTask()">+ Spawn runner</button>
+    </div>
+    <div id="taskDetailRunners" style="font-size:11px;max-height:240px;overflow-y:auto"></div>
+  </div>
+  <div class="actions"><button class="btn" onclick="closeTaskDetail()">Close</button></div>
 </div>
 </div>
 
@@ -422,6 +429,8 @@ let channels = [];
 let members = [];
 let tasks = [];
 let unread = {};
+let activeRunners = []; // flat list of all non-terminal runners
+let currentTaskDetailId = 0;
 
 function connect() {
   ws = new WebSocket(`${location.protocol.replace('http', 'ws')}//${location.host}/ws?nick=${NICK}`);
@@ -478,6 +487,11 @@ function handleWS(msg) {
     case 'review_created':
     case 'review_responded':
       loadReviews(); break;
+    case 'runner_spawned':
+    case 'runner_status':
+      loadActiveRunners().then(renderBoard);
+      if (currentTaskDetailId) loadTaskRunners(currentTaskDetailId);
+      break;
   }
 }
 
@@ -588,7 +602,33 @@ async function loadTasks() {
   const res = await fetch('/api/tasks');
   const data = await res.json();
   tasks = Array.isArray(data) ? data : [];
+  await loadActiveRunners();
   renderBoard();
+}
+
+async function loadActiveRunners() {
+  try {
+    const res = await fetch('/api/runners?active=1');
+    const data = await res.json();
+    activeRunners = Array.isArray(data) ? data : [];
+  } catch (e) {
+    activeRunners = [];
+  }
+}
+
+function runnerForTask(taskId) {
+  return (activeRunners || []).find(r => r.task_id === taskId);
+}
+
+function runnerStatusColor(status) {
+  switch (status) {
+    case 'running': return 'var(--green)';
+    case 'blocked': return 'var(--yellow)';
+    case 'complete': return 'var(--accent)';
+    case 'crashed': return 'var(--red, #e74c3c)';
+    case 'cancelled': return 'var(--text3)';
+    default: return 'var(--text3)';
+  }
 }
 
 async function loadWorkers() {
@@ -930,6 +970,7 @@ function renderJsonLog(div, msg) {
 
 let currentLogWorkerId = 0;
 let currentLogWorkerNick = '';
+let currentLogIsRunner = false; // true when viewing runner logs (different endpoints, no chat)
 let logSSE = null;
 let transcriptSSE = null;
 let ttySSE = null;
@@ -937,16 +978,46 @@ let xtermInstance = null;
 let currentLogTab = 'logs';
 
 function openLogViewer(workerId, nick) {
+  currentLogIsRunner = false;
   currentLogWorkerId = workerId;
   currentLogWorkerNick = nick;
   document.getElementById('logTitle').textContent = `${nick} #${workerId}`;
   document.getElementById('workerMsgInput').placeholder = `Send to ${nick}'s channel... (Enter)`;
+  document.getElementById('workerMsgInput').style.display = '';
   // Hide TTY tab for ACP workers (no PTY)
   const emp = members.find(m => m.nickname === nick);
   const ttyTab = document.querySelector('.log-tab[data-logtab="tty"]');
   if (ttyTab) ttyTab.style.display = emp?.harness === 'acp' ? 'none' : '';
+  // Show transcript tab for workers (default)
+  const transcriptTab = document.querySelector('.log-tab[data-logtab="transcript"]');
+  if (transcriptTab) transcriptTab.style.display = '';
   document.getElementById('logOverlay').classList.add('active');
   switchLogTab('logs');
+}
+
+// openRunnerLogViewer reuses the worker log overlay UI but switches the
+// SSE endpoints to the /api/runners/{id}/* routes. Runners have no chat,
+// so the message input is hidden, and no transcript is generated, so
+// that tab is hidden too. The runner row has its own LogPath; the TTY
+// file follows the same naming convention as worker TTYs (nick-time.tty).
+function openRunnerLogViewer(runnerId, nick) {
+  currentLogIsRunner = true;
+  currentLogWorkerId = runnerId;
+  currentLogWorkerNick = nick;
+  document.getElementById('logTitle').textContent = `runner ${nick} #${runnerId}`;
+  document.getElementById('workerMsgInput').style.display = 'none';
+  // Runners always have a PTY but never write a transcript file.
+  const ttyTab = document.querySelector('.log-tab[data-logtab="tty"]');
+  if (ttyTab) ttyTab.style.display = '';
+  const transcriptTab = document.querySelector('.log-tab[data-logtab="transcript"]');
+  if (transcriptTab) transcriptTab.style.display = 'none';
+  document.getElementById('logOverlay').classList.add('active');
+  switchLogTab('logs');
+}
+
+function logEndpoint(kind) {
+  const base = currentLogIsRunner ? '/api/runners/' : '/api/workers/';
+  return base + currentLogWorkerId + '/' + kind;
 }
 
 function switchLogTab(tab) {
@@ -983,7 +1054,7 @@ function autoScrollStream(el, sse) {
 function startLogStream() {
   const el = document.getElementById('logContent');
   el.innerHTML = '';
-  logSSE = new EventSource(`/api/workers/${currentLogWorkerId}/logs`);
+  logSSE = new EventSource(logEndpoint('logs'));
   autoScrollStream(el, logSSE);
   logSSE.onerror = () => { logSSE?.close(); logSSE = null; };
 }
@@ -991,6 +1062,10 @@ function startLogStream() {
 function startTranscriptStream() {
   const el = document.getElementById('transcriptContent');
   el.innerHTML = '';
+  if (currentLogIsRunner) {
+    el.innerHTML = '<div style="color:var(--text3);font-size:12px;padding:8px">Runners do not produce a transcript.</div>';
+    return;
+  }
   transcriptSSE = new EventSource(`/api/workers/${currentLogWorkerId}/transcript`);
   autoScrollStream(el, transcriptSSE);
   transcriptSSE.onerror = () => {
@@ -1033,8 +1108,9 @@ function startTTY() {
     });
   }
 
-  // Stream raw PTY output (base64-encoded) via /api/workers/:id/tty
-  ttySSE = new EventSource(`/api/workers/${currentLogWorkerId}/tty`);
+  // Stream raw PTY output (base64-encoded). Endpoint switches to
+  // /api/runners/{id}/tty when viewing a runner.
+  ttySSE = new EventSource(logEndpoint('tty'));
   ttySSE.onmessage = (e) => {
     const binary = atob(e.data);
     const bytes = new Uint8Array(binary.length);
@@ -1045,15 +1121,18 @@ function startTTY() {
   };
   ttySSE.onerror = () => { ttySSE?.close(); ttySSE = null; };
 
-  // Forward keystrokes from xterm.js → WebSocket → worker PTY
+  // Forward keystrokes from xterm.js → WebSocket → worker PTY.
+  // Disabled for runners — they don't subscribe to worker_tty_input.
   term.onData((data) => {
+    if (currentLogIsRunner) return;
     if (currentLogWorkerNick) {
       send({ type: 'worker_tty_input', to: currentLogWorkerNick, text: data });
     }
   });
 
-  // Sync terminal size to PTY
+  // Sync terminal size to PTY. Skipped for runners (no input loop).
   const sendResize = () => {
+    if (currentLogIsRunner) return;
     if (currentLogWorkerNick) {
       send({ type: 'worker_tty_resize', to: currentLogWorkerNick, text: `${term.cols}x${term.rows}` });
     }
@@ -1071,6 +1150,7 @@ function closeLogViewer() {
   if (xtermInstance) { xtermInstance.dispose(); xtermInstance = null; }
   currentLogWorkerNick = '';
   currentLogWorkerId = 0;
+  currentLogIsRunner = false;
 }
 
 function sendWorkerMessage() {
@@ -1097,7 +1177,13 @@ function renderBoard() {
   document.querySelectorAll('.board-col .tasks').forEach(col => {
     const status = col.dataset.status;
     const filtered = (tasks || []).filter(t => t.status === status);
-    col.innerHTML = filtered.map(t => `<div class="task-card" onclick="showTaskDetail(${t.id})"><div class="title">#${t.id} ${escHtml(t.title)}</div><div class="meta">${t.assignee || 'unassigned'}</div></div>`).join('');
+    col.innerHTML = filtered.map(t => {
+      const r = runnerForTask(t.id);
+      const runnerBadge = r
+        ? `<span style="font-size:9px;padding:1px 5px;border-radius:3px;background:var(--bg3);color:${runnerStatusColor(r.status)};margin-left:6px" title="runner ${escHtml(r.nickname)} — ${r.status}">⚙ ${escHtml(r.nickname)}</span>`
+        : '';
+      return `<div class="task-card" onclick="showTaskDetail(${t.id})"><div class="title">#${t.id} ${escHtml(t.title)}${runnerBadge}</div><div class="meta">${t.assignee || 'unassigned'}</div></div>`;
+    }).join('');
   });
 }
 
@@ -1108,13 +1194,86 @@ async function showTaskDetail(id) {
   // Could be {task, project} or just the task
   const t = data.task || data;
   const proj = data.project;
+  currentTaskDetailId = t.id;
   document.getElementById('taskDetailTitle').textContent = '#' + t.id + ' ' + t.title;
   document.getElementById('taskDetailStatus').textContent = t.status;
   const meta = ['Assignee: ' + (t.assignee || 'unassigned'), 'Created by: ' + t.created_by, 'Updated: ' + t.updated_at];
   if (proj) meta.push('Project: ' + proj.name + (proj.path ? ' (' + proj.path + ')' : ''));
   document.getElementById('taskDetailMeta').textContent = meta.join(' · ');
   document.getElementById('taskDetailDesc').innerHTML = t.description ? renderMd(t.description) : '<span style="color:var(--text3)">(no description)</span>';
+  loadTaskRunners(t.id);
   showModal('taskDetailModal');
+}
+
+async function loadTaskRunners(taskId) {
+  const el = document.getElementById('taskDetailRunners');
+  if (!el) return;
+  let runners = [];
+  try {
+    const res = await fetch('/api/tasks/' + taskId + '/runners');
+    if (res.ok) runners = await res.json();
+  } catch (e) {}
+  if (!Array.isArray(runners)) runners = [];
+  if (!runners.length) {
+    el.innerHTML = '<div style="color:var(--text3);font-size:11px">No runners yet. Spawn one to start work on this task.</div>';
+    return;
+  }
+  el.innerHTML = runners.map(r => {
+    const color = runnerStatusColor(r.status);
+    const isActive = r.status === 'running' || r.status === 'blocked';
+    const heart = r.last_heartbeat ? new Date(r.last_heartbeat + 'Z').toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '—';
+    const summary = r.last_summary ? `<div style="margin-top:4px;color:var(--text2);white-space:pre-wrap">${escHtml(r.last_summary)}</div>` : '';
+    const blocked = r.status === 'blocked' && r.blocked_reason ? `<div style="margin-top:4px;color:var(--yellow)">⚠ ${escHtml(r.blocked_reason)}</div>` : '';
+    const harness = r.harness_in_use ? '<span style="color:var(--yellow);margin-left:6px" title="using harness">🎮</span>' : '';
+    const cancelBtn = isActive ? `<button class="btn" style="font-size:10px;padding:2px 6px" onclick="cancelRunner(${r.id})">Cancel</button>` : '';
+    const logsBtn = `<button class="btn" style="font-size:10px;padding:2px 6px" onclick="event.stopPropagation();openRunnerLogViewer(${r.id},'${escHtml(r.nickname)}')">📄 Logs</button>`;
+    return `<div style="border:1px solid var(--bg3);border-radius:4px;padding:8px;margin-bottom:6px">
+      <div style="display:flex;align-items:center;gap:6px">
+        <span style="font-weight:600">⚙ ${escHtml(r.nickname)}</span>${harness}
+        <span style="font-size:10px;padding:1px 6px;border-radius:3px;background:var(--bg3);color:${color}">${r.status}</span>
+        <span style="flex:1"></span>
+        ${logsBtn}
+        ${cancelBtn}
+      </div>
+      <div style="margin-top:4px;font-size:10px;color:var(--text3)">
+        parent: ${escHtml(r.parent_nick || '—')} · pid: ${r.pid || '—'} · heartbeat: ${heart}
+      </div>
+      <div style="margin-top:2px;font-size:10px;color:var(--text3);font-family:monospace;word-break:break-all">
+        ${escHtml(r.branch_name || '')}${r.branch_name && r.worktree_path ? ' @ ' : ''}${escHtml(r.worktree_path || '')}
+      </div>
+      ${blocked}
+      ${summary}
+    </div>`;
+  }).join('');
+}
+
+async function spawnRunnerForCurrentTask() {
+  if (!currentTaskDetailId) return;
+  const btn = document.getElementById('taskDetailSpawnBtn');
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ Spawning...'; }
+  try {
+    const res = await fetch('/api/tasks/' + currentTaskDetailId + '/spawn-runner', { method: 'POST' });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      alert(data.error || 'Failed to spawn runner');
+    }
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '+ Spawn runner'; }
+    loadTaskRunners(currentTaskDetailId);
+    loadActiveRunners().then(renderBoard);
+  }
+}
+
+function closeTaskDetail() {
+  currentTaskDetailId = 0;
+  hideModal('taskDetailModal');
+}
+
+async function cancelRunner(runnerId) {
+  if (!confirm('Cancel this runner? The Claude process will be killed and the worktree marked cancelled.')) return;
+  await fetch('/api/runners/' + runnerId + '/cancel', { method: 'POST' });
+  if (currentTaskDetailId) loadTaskRunners(currentTaskDetailId);
+  loadActiveRunners().then(renderBoard);
 }
 
 function appendMessage(m) {

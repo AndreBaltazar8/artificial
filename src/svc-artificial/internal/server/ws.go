@@ -81,8 +81,12 @@ func (h *Hub) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Only broadcast join for genuinely new connections, not reconnects after hub restart
-	if nick != "commander" && !isReconnect {
+	// Only broadcast join for genuinely new connections, not reconnects after hub restart.
+	// Task runners (nick prefix "runner-") are intentionally silent —
+	// they aren't team members, just ephemeral workers, and a "joined"
+	// broadcast would land as a chat notification on every other agent.
+	isRunner := strings.HasPrefix(nick, "runner-")
+	if nick != "commander" && !isReconnect && !isRunner {
 		h.broadcast(protocol.WSMessage{
 			Type: protocol.MsgMemberJoined,
 			Nick: nick,
@@ -194,7 +198,187 @@ func (h *Hub) handleMessage(ctx context.Context, c *client, msg protocol.WSMessa
 		h.handleHostToolList(c, msg)
 	case protocol.MsgCallTool:
 		h.handleCallTool(c, msg)
+	case protocol.MsgRunnerCheckpoint:
+		h.handleRunnerCheckpoint(c, msg)
+	case protocol.MsgRunnerBlocked:
+		h.handleRunnerBlocked(c, msg)
+	case protocol.MsgRunnerComplete:
+		h.handleRunnerComplete(c, msg)
 	}
+}
+
+// ── Runner Events ───────────────────────────────────────────────────────
+
+// handleRunnerCheckpoint is invoked when a runner sends MsgRunnerCheckpoint
+// over the WS — a structured progress signal. The msg.ID field carries
+// the runner ID; payload is RunnerCheckpointPayload. We persist the
+// summary (also bumps last_heartbeat) and forward a notification to
+// the parent worker so the manager Claude sees progress without
+// having to poll.
+func (h *Hub) handleRunnerCheckpoint(c *client, msg protocol.WSMessage) {
+	runnerID := msg.ID
+	if runnerID == 0 {
+		return
+	}
+	var p protocol.RunnerCheckpointPayload
+	if msg.Data != nil {
+		json.Unmarshal(msg.Data, &p)
+	}
+	if p.Summary == "" {
+		return
+	}
+	if err := h.db.RecordRunnerCheckpoint(runnerID, p.Summary); err != nil {
+		slog.Warn("runner checkpoint persist failed", "err", err, "runner_id", runnerID)
+		return
+	}
+	tr, err := h.db.GetTaskRunner(runnerID)
+	if err != nil {
+		return
+	}
+	// Forward to parent worker as a worker_notify so it shows up as a
+	// channel notification in their Claude harness.
+	if tr.ParentNick != "" && tr.ParentNick != "commander" {
+		h.sendTo(tr.ParentNick, protocol.WSMessage{
+			Type: protocol.MsgWorkerNotify,
+			From: tr.Nickname,
+			Text: fmt.Sprintf("[runner #%d checkpoint] %s", tr.ID, p.Summary),
+		})
+	}
+	data, _ := json.Marshal(tr)
+	h.broadcast(protocol.WSMessage{Type: protocol.MsgRunnerStatus, Data: data}, "")
+}
+
+// handleRunnerBlocked transitions the runner to status=blocked with a
+// reason. The runner Claude is expected to keep its WS connection open
+// while blocked so the manager (or commander) can DM it through
+// MsgWorkerNotify with a resolution.
+func (h *Hub) handleRunnerBlocked(c *client, msg protocol.WSMessage) {
+	runnerID := msg.ID
+	if runnerID == 0 {
+		return
+	}
+	var p protocol.RunnerBlockedPayload
+	if msg.Data != nil {
+		json.Unmarshal(msg.Data, &p)
+	}
+	reason := p.Reason
+	if p.Question != "" {
+		reason = reason + " — Q: " + p.Question
+	}
+	if reason == "" {
+		reason = "(no reason given)"
+	}
+	if err := h.db.MarkRunnerBlocked(runnerID, reason); err != nil {
+		slog.Warn("runner blocked persist failed", "err", err, "runner_id", runnerID)
+		return
+	}
+	tr, err := h.db.GetTaskRunner(runnerID)
+	if err != nil {
+		return
+	}
+	if tr.ParentNick != "" && tr.ParentNick != "commander" {
+		h.sendTo(tr.ParentNick, protocol.WSMessage{
+			Type: protocol.MsgWorkerNotify,
+			From: tr.Nickname,
+			Text: fmt.Sprintf("[runner #%d BLOCKED] %s", tr.ID, reason),
+		})
+	}
+
+	// Surface this in the reviews tab so the manager can respond from the
+	// dashboard. The body is JSON the dashboard parses to render runner-
+	// specific fields (worktree, branch, the question). When the manager
+	// responds, apiRespondToReview routes the response back to the runner
+	// via MsgWorkerNotify so its handleRunnerHubMessage picks it up.
+	body, _ := json.Marshal(map[string]any{
+		"runner_id":     tr.ID,
+		"task_id":       tr.TaskID,
+		"reason":        p.Reason,
+		"question":      p.Question,
+		"worktree_path": tr.WorktreePath,
+		"branch_name":   tr.BranchName,
+	})
+	if _, err := h.db.CreateReview(
+		tr.Nickname,
+		fmt.Sprintf("Runner blocked on task #%d", tr.TaskID),
+		reason,
+		"runner_blocked",
+		string(body),
+	); err != nil {
+		slog.Warn("create runner_blocked review failed", "err", err, "runner_id", tr.ID)
+	} else {
+		// Tell the dashboard to refresh its reviews tab — same event the
+		// rest of the review-creation paths emit.
+		h.broadcast(protocol.WSMessage{Type: protocol.MsgReviewCreated}, "")
+	}
+
+	data, _ := json.Marshal(tr)
+	h.broadcast(protocol.WSMessage{Type: protocol.MsgRunnerStatus, Data: data}, "")
+}
+
+// handleRunnerComplete is the success-path terminal transition. Marks
+// the runner complete, moves the task to in_qa (manager review
+// pending), and tells the parent worker the branch is ready.
+func (h *Hub) handleRunnerComplete(c *client, msg protocol.WSMessage) {
+	runnerID := msg.ID
+	if runnerID == 0 {
+		return
+	}
+	var p protocol.RunnerCompletePayload
+	if msg.Data != nil {
+		json.Unmarshal(msg.Data, &p)
+	}
+	summary := p.Summary
+	if summary == "" {
+		summary = "(no summary)"
+	}
+	if err := h.db.MarkRunnerComplete(runnerID, summary); err != nil {
+		slog.Warn("runner complete persist failed", "err", err, "runner_id", runnerID)
+		return
+	}
+	tr, err := h.db.GetTaskRunner(runnerID)
+	if err != nil {
+		return
+	}
+	// Move the task into in_qa so the manager knows there's work to
+	// review. Commander can move it to done once they've inspected
+	// the runner's branch.
+	inQA := "in_qa"
+	h.db.UpdateTask(tr.TaskID, &inQA, nil)
+
+	if tr.ParentNick != "" && tr.ParentNick != "commander" {
+		h.sendTo(tr.ParentNick, protocol.WSMessage{
+			Type: protocol.MsgWorkerNotify,
+			From: tr.Nickname,
+			Text: fmt.Sprintf("[runner #%d COMPLETE] branch %s — %s", tr.ID, p.BranchName, summary),
+		})
+	}
+
+	// Mirror task_complete into the reviews tab so the manager has a
+	// review row to act on (merge / request changes / mark reviewed).
+	// Body is JSON: branch + commits + worktree path are the artifacts
+	// the manager needs to inspect the runner's work.
+	body, _ := json.Marshal(map[string]any{
+		"runner_id":     tr.ID,
+		"task_id":       tr.TaskID,
+		"summary":       summary,
+		"branch_name":   p.BranchName,
+		"commits":       p.Commits,
+		"worktree_path": tr.WorktreePath,
+	})
+	if _, err := h.db.CreateReview(
+		tr.Nickname,
+		fmt.Sprintf("Runner finished task #%d", tr.TaskID),
+		summary,
+		"runner_complete",
+		string(body),
+	); err != nil {
+		slog.Warn("create runner_complete review failed", "err", err, "runner_id", tr.ID)
+	} else {
+		h.broadcast(protocol.WSMessage{Type: protocol.MsgReviewCreated}, "")
+	}
+
+	data, _ := json.Marshal(tr)
+	h.broadcast(protocol.WSMessage{Type: protocol.MsgRunnerStatus, Data: data}, "")
 }
 
 // ── Chat ────────────────────────────────────────────────────────────────

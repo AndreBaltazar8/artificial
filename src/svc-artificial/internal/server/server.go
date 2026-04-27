@@ -65,6 +65,11 @@ func (s *Server) Run(ctx context.Context) error {
 	// and recorded in the host's errors map; the others still launch.
 	s.Hub.ReconcileHostPlugins(ctx)
 
+	// Runner watchdog: every 30s it sweeps active task_runners and
+	// marks crashed any whose process is dead or whose heartbeat has
+	// gone stale. Stops automatically on ctx cancel.
+	go s.runRunnerWatchdog(ctx)
+
 	go func() {
 		<-ctx.Done()
 		// Kill every host-scope plugin subprocess before the HTTP

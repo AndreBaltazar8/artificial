@@ -181,7 +181,36 @@ var migrations = []migration{
 	{3, `
 		ALTER TABLE plugins ADD COLUMN scope TEXT NOT NULL DEFAULT 'host';
 	`},
-	// -- future migrations go here as {4, `...`}, etc.
+	// Migration 4 adds the ephemeral task_runners table and a small
+	// set of supporting columns on tasks. Runners are short-lived
+	// cmd-worker processes that own a single task end-to-end on a
+	// dedicated git worktree; they do not appear in employees and are
+	// not reused. Storing them in their own table (rather than re-using
+	// workers) keeps the persistent-worker fast paths (channel
+	// joining, plugin reconciliation, last-connected) untouched.
+	{4, `
+		CREATE TABLE IF NOT EXISTS task_runners (
+			id              INTEGER PRIMARY KEY AUTOINCREMENT,
+			task_id         INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+			nickname        TEXT NOT NULL,
+			parent_nick     TEXT NOT NULL DEFAULT '',
+			pid             INTEGER NOT NULL DEFAULT 0,
+			status          TEXT NOT NULL DEFAULT 'running',
+			worktree_path   TEXT NOT NULL,
+			branch_name     TEXT NOT NULL,
+			base_branch     TEXT NOT NULL DEFAULT '',
+			harness_in_use  INTEGER NOT NULL DEFAULT 0,
+			last_summary    TEXT NOT NULL DEFAULT '',
+			blocked_reason  TEXT NOT NULL DEFAULT '',
+			log_path        TEXT NOT NULL DEFAULT '',
+			started_at      TEXT DEFAULT (datetime('now')),
+			last_heartbeat  TEXT,
+			finished_at     TEXT
+		);
+		CREATE INDEX IF NOT EXISTS idx_task_runners_task ON task_runners(task_id);
+		CREATE INDEX IF NOT EXISTS idx_task_runners_status ON task_runners(status);
+	`},
+	// -- future migrations go here as {5, `...`}, etc.
 }
 
 func now() string { return time.Now().UTC().Format(time.DateTime) }
@@ -1289,6 +1318,233 @@ func (d *DB) SetPluginConfig(id int64, configJSON string) (protocol.Plugin, erro
 func (d *DB) DeletePlugin(id int64) error {
 	_, err := d.db.Exec(`DELETE FROM plugins WHERE id = ?`, id)
 	return err
+}
+
+// ── Task Runners ────────────────────────────────────────────────────────
+
+// CreateTaskRunner inserts a new runner row in status="running". Caller
+// is responsible for actually starting the cmd-worker process and
+// updating PID via UpdateTaskRunnerPID once the process is forked.
+func (d *DB) CreateTaskRunner(taskID int64, nickname, parentNick, worktreePath, branchName, baseBranch, logPath string) (protocol.TaskRunner, error) {
+	ts := now()
+	res, err := d.db.Exec(
+		`INSERT INTO task_runners (task_id, nickname, parent_nick, worktree_path, branch_name, base_branch, log_path, started_at, last_heartbeat) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		taskID, nickname, parentNick, worktreePath, branchName, baseBranch, logPath, ts, ts,
+	)
+	if err != nil {
+		return protocol.TaskRunner{}, err
+	}
+	id, _ := res.LastInsertId()
+	return protocol.TaskRunner{
+		ID: id, TaskID: taskID, Nickname: nickname, ParentNick: parentNick,
+		Status: protocol.RunnerStatusRunning, WorktreePath: worktreePath,
+		BranchName: branchName, BaseBranch: baseBranch, LogPath: logPath,
+		StartedAt: ts, LastHeartbeat: ts,
+	}, nil
+}
+
+// UpdateTaskRunnerPID stores the forked process PID once the parent
+// has the value. Done out-of-band so the row exists before fork — that
+// way a fork failure still leaves a record we can mark crashed.
+func (d *DB) UpdateTaskRunnerPID(id int64, pid int) error {
+	_, err := d.db.Exec(`UPDATE task_runners SET pid = ? WHERE id = ?`, pid, id)
+	return err
+}
+
+// UpdateTaskRunnerStatus moves a runner between lifecycle states. When
+// transitioning to a terminal state (complete | crashed | cancelled |
+// blocked) caller should also pass non-empty reason/summary via the
+// dedicated helpers below — this method is the low-level primitive.
+func (d *DB) UpdateTaskRunnerStatus(id int64, status string) error {
+	if isTerminalRunnerStatus(status) {
+		_, err := d.db.Exec(`UPDATE task_runners SET status = ?, finished_at = ? WHERE id = ?`, status, now(), id)
+		return err
+	}
+	_, err := d.db.Exec(`UPDATE task_runners SET status = ? WHERE id = ?`, status, id)
+	return err
+}
+
+func isTerminalRunnerStatus(s string) bool {
+	switch s {
+	case protocol.RunnerStatusComplete, protocol.RunnerStatusCrashed, protocol.RunnerStatusCancelled:
+		return true
+	}
+	return false
+}
+
+// RecordRunnerHeartbeat updates last_heartbeat to now. Watchdog uses
+// this column to detect runners whose process is alive on the surface
+// but has stopped making progress.
+func (d *DB) RecordRunnerHeartbeat(id int64) error {
+	_, err := d.db.Exec(`UPDATE task_runners SET last_heartbeat = ? WHERE id = ?`, now(), id)
+	return err
+}
+
+// RecordRunnerCheckpoint stores a free-form summary line on the runner
+// so the dashboard can show "what was the runner doing last?" without
+// needing the full transcript. Also bumps last_heartbeat — the
+// presence of a checkpoint is itself a liveness signal.
+func (d *DB) RecordRunnerCheckpoint(id int64, summary string) error {
+	_, err := d.db.Exec(
+		`UPDATE task_runners SET last_summary = ?, last_heartbeat = ? WHERE id = ?`,
+		summary, now(), id,
+	)
+	return err
+}
+
+// MarkRunnerBlocked transitions a runner to status="blocked" with a
+// reason string the manager UI can surface. The runner process is
+// expected to keep its WS connection open while blocked so the
+// manager can DM it through MsgWorkerNotify with a resolution.
+func (d *DB) MarkRunnerBlocked(id int64, reason string) error {
+	_, err := d.db.Exec(
+		`UPDATE task_runners SET status = ?, blocked_reason = ?, last_heartbeat = ? WHERE id = ?`,
+		protocol.RunnerStatusBlocked, reason, now(), id,
+	)
+	return err
+}
+
+// MarkRunnerComplete is the success-path terminal transition. summary
+// is what the runner reports as its final state ("merged 3 commits to
+// branch X" or similar) — distinct from per-checkpoint summaries.
+func (d *DB) MarkRunnerComplete(id int64, summary string) error {
+	_, err := d.db.Exec(
+		`UPDATE task_runners SET status = ?, last_summary = ?, finished_at = ? WHERE id = ?`,
+		protocol.RunnerStatusComplete, summary, now(), id,
+	)
+	return err
+}
+
+// MarkRunnerCrashed is invoked by the watchdog when a runner's PID is
+// dead and the runner is still in a non-terminal state. The reason
+// goes into blocked_reason rather than a new column to keep the
+// schema small — both are "why did this runner stop being useful".
+func (d *DB) MarkRunnerCrashed(id int64, reason string) error {
+	_, err := d.db.Exec(
+		`UPDATE task_runners SET status = ?, blocked_reason = ?, finished_at = ? WHERE id = ?`,
+		protocol.RunnerStatusCrashed, reason, now(), id,
+	)
+	return err
+}
+
+// SetTaskRunnerHarnessInUse flips the harness_in_use flag. The dev
+// harness is a singleton today, so the dashboard surfaces this so a
+// commander can see at a glance which runner is currently driving it.
+func (d *DB) SetTaskRunnerHarnessInUse(id int64, inUse bool) error {
+	v := 0
+	if inUse {
+		v = 1
+	}
+	_, err := d.db.Exec(`UPDATE task_runners SET harness_in_use = ? WHERE id = ?`, v, id)
+	return err
+}
+
+// GetTaskRunner returns a runner by ID.
+func (d *DB) GetTaskRunner(id int64) (protocol.TaskRunner, error) {
+	row := d.db.QueryRow(
+		`SELECT id, task_id, nickname, parent_nick, pid, status, worktree_path, branch_name, base_branch, harness_in_use, last_summary, blocked_reason, log_path, started_at, last_heartbeat, finished_at FROM task_runners WHERE id = ?`,
+		id,
+	)
+	return scanTaskRunner(row)
+}
+
+// GetTaskRunnerByNick returns a runner by its WebSocket nickname.
+// Used when a runner sends a hub message and the server needs to
+// resolve which DB row it represents.
+func (d *DB) GetTaskRunnerByNick(nick string) (protocol.TaskRunner, error) {
+	row := d.db.QueryRow(
+		`SELECT id, task_id, nickname, parent_nick, pid, status, worktree_path, branch_name, base_branch, harness_in_use, last_summary, blocked_reason, log_path, started_at, last_heartbeat, finished_at FROM task_runners WHERE nickname = ? ORDER BY id DESC LIMIT 1`,
+		nick,
+	)
+	return scanTaskRunner(row)
+}
+
+// GetActiveRunnerForTask returns the currently-running runner for a
+// task, or sql.ErrNoRows if there isn't one. "Active" means status in
+// (running, blocked) — terminal runners are kept for history but
+// don't block fresh spawns.
+func (d *DB) GetActiveRunnerForTask(taskID int64) (protocol.TaskRunner, error) {
+	row := d.db.QueryRow(
+		`SELECT id, task_id, nickname, parent_nick, pid, status, worktree_path, branch_name, base_branch, harness_in_use, last_summary, blocked_reason, log_path, started_at, last_heartbeat, finished_at FROM task_runners WHERE task_id = ? AND status IN ('running','blocked') ORDER BY id DESC LIMIT 1`,
+		taskID,
+	)
+	return scanTaskRunner(row)
+}
+
+// ListRunnersForTask returns every runner ever spawned for a task,
+// newest first. Useful for the task-detail panel's history view.
+func (d *DB) ListRunnersForTask(taskID int64) ([]protocol.TaskRunner, error) {
+	rows, err := d.db.Query(
+		`SELECT id, task_id, nickname, parent_nick, pid, status, worktree_path, branch_name, base_branch, harness_in_use, last_summary, blocked_reason, log_path, started_at, last_heartbeat, finished_at FROM task_runners WHERE task_id = ? ORDER BY id DESC`,
+		taskID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []protocol.TaskRunner
+	for rows.Next() {
+		r, err := scanTaskRunner(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// ListActiveRunners returns every runner currently in a non-terminal
+// state. The watchdog reads this to decide which PIDs to poke.
+func (d *DB) ListActiveRunners() ([]protocol.TaskRunner, error) {
+	rows, err := d.db.Query(
+		`SELECT id, task_id, nickname, parent_nick, pid, status, worktree_path, branch_name, base_branch, harness_in_use, last_summary, blocked_reason, log_path, started_at, last_heartbeat, finished_at FROM task_runners WHERE status IN ('running','blocked') ORDER BY id`,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []protocol.TaskRunner
+	for rows.Next() {
+		r, err := scanTaskRunner(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+func scanTaskRunner(r interface {
+	Scan(dest ...any) error
+}) (protocol.TaskRunner, error) {
+	var (
+		tr           protocol.TaskRunner
+		parentNick   string
+		baseBranch   string
+		harnessInUse int
+		lastSummary  string
+		blockedReason string
+		logPath      string
+		lastHB       sql.NullString
+		finishedAt   sql.NullString
+	)
+	if err := r.Scan(
+		&tr.ID, &tr.TaskID, &tr.Nickname, &parentNick, &tr.PID, &tr.Status,
+		&tr.WorktreePath, &tr.BranchName, &baseBranch, &harnessInUse,
+		&lastSummary, &blockedReason, &logPath,
+		&tr.StartedAt, &lastHB, &finishedAt,
+	); err != nil {
+		return protocol.TaskRunner{}, err
+	}
+	tr.ParentNick = parentNick
+	tr.BaseBranch = baseBranch
+	tr.HarnessInUse = harnessInUse == 1
+	tr.LastSummary = lastSummary
+	tr.BlockedReason = blockedReason
+	tr.LogPath = logPath
+	tr.LastHeartbeat = lastHB.String
+	tr.FinishedAt = finishedAt.String
+	return tr, nil
 }
 
 // scanPlugin is a small helper shared by the row-at-a-time query paths.

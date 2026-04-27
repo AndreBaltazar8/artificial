@@ -24,7 +24,17 @@ func main() {
 	serverURL := flag.String("server", "localhost:3456", "svc-artificial host:port")
 	employeeID := flag.Int64("employee-id", 0, "Employee ID to connect as")
 	preWorkerID := flag.Int64("worker-id", 0, "Pre-assigned worker ID (from spawn endpoint)")
+	taskRunner := flag.Bool("task-runner", false, "Run as an ephemeral task runner instead of a long-lived employee worker")
+	runnerID := flag.Int64("runner-id", 0, "task_runners.id (required when --task-runner is set)")
 	flag.Parse()
+
+	// Task-runner mode is a fully separate code path — different
+	// lifetime, no employee config, restricted MCP tool surface, dies
+	// on task_complete. Dispatch before any employee-ID gating below.
+	if *taskRunner {
+		runTaskRunner(*serverURL, *runnerID)
+		return
+	}
 
 	if *employeeID == 0 {
 		fmt.Fprintln(os.Stderr, "error: --employee-id required")
