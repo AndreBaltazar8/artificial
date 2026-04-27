@@ -10,9 +10,9 @@ import (
 	"reflect"
 	"strings"
 
-	"artificial.pt/pkg-go-shared/protocol"
 	"artificial.pt/cmd-worker/internal/hub"
 	"artificial.pt/pkg-go-shared/pluginhost"
+	"artificial.pt/pkg-go-shared/protocol"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -324,11 +324,11 @@ type taskCreateInput struct {
 	// predictable shape every time. Spec the work like a one-page brief
 	// so the runner can execute autonomously without needing to come
 	// back with task_blocked.
-	Goal                string   `json:"goal,omitempty"                 jsonschema:"What outcome this task achieves, one sentence. The runner uses this to decide if its work matches the intent."`
-	Context             string   `json:"context,omitempty"              jsonschema:"Background a runner needs that isn't obvious from the code: why this matters, prior incidents, related decisions."`
-	AcceptanceCriteria  []string `json:"acceptance_criteria,omitempty"  jsonschema:"Concrete pass/fail bullets. The runner MUST verify each one before calling task_complete. e.g. 'svc-gapi build passes', 'login-shed path sleeps 80–220ms'."`
-	Constraints         []string `json:"constraints,omitempty"          jsonschema:"Hard rules: scope limits, files to avoid, perf/security guarantees that must hold. e.g. 'do not change request body shape', 'no new dependencies'."`
-	Files               []string `json:"files,omitempty"                jsonschema:"Optional pointers to files the runner will likely touch — saves it the discovery round-trip."`
+	Goal               string   `json:"goal,omitempty"                 jsonschema:"What outcome this task achieves, one sentence. The runner uses this to decide if its work matches the intent."`
+	Context            string   `json:"context,omitempty"              jsonschema:"Background a runner needs that isn't obvious from the code: why this matters, prior incidents, related decisions."`
+	AcceptanceCriteria []string `json:"acceptance_criteria,omitempty"  jsonschema:"Concrete pass/fail bullets. The runner MUST verify each one before calling task_complete. e.g. 'svc-gapi build passes', 'login-shed path sleeps 80–220ms'."`
+	Constraints        []string `json:"constraints,omitempty"          jsonschema:"Hard rules: scope limits, files to avoid, perf/security guarantees that must hold. e.g. 'do not change request body shape', 'no new dependencies'."`
+	Files              []string `json:"files,omitempty"                jsonschema:"Optional pointers to files the runner will likely touch — saves it the discovery round-trip."`
 }
 
 // renderTaskDescription assembles the structured fields of taskCreateInput
@@ -390,9 +390,10 @@ func renderTaskDescription(in taskCreateInput) string {
 }
 
 type taskUpdateInput struct {
-	ID       flexID `json:"id"       jsonschema:"Task ID"`
-	Status   string `json:"status,omitempty"   jsonschema:"New status: backlog, todo, in_progress, in_qa, done"`
-	Assignee string `json:"assignee,omitempty" jsonschema:"New assignee nickname (optional)"`
+	ID        flexID  `json:"id"       jsonschema:"Task ID"`
+	Status    *string `json:"status,omitempty"   jsonschema:"New status: backlog, todo, in_progress, in_qa, done"`
+	Assignee  *string `json:"assignee,omitempty" jsonschema:"New assignee nickname (optional). Empty string clears the assignee."`
+	ProjectID *flexID `json:"project_id,omitempty" jsonschema:"New project ID. Use 0 to clear the project assignment."`
 }
 
 type taskListInput struct {
@@ -957,21 +958,46 @@ func (s *Server) registerTools() {
 
 	gomcp.AddTool(s.mcpServer, &gomcp.Tool{
 		Name:        "task_update",
-		Description: "Update a task's status or assignee.",
+		Description: "Update a task's status, assignee, or project assignment.",
 	}, func(ctx context.Context, req *gomcp.CallToolRequest, input taskUpdateInput) (*gomcp.CallToolResult, any, error) {
 		if input.ID == 0 {
 			return nil, nil, fmt.Errorf("task id required")
 		}
-		data, _ := json.Marshal(map[string]any{
-			"id":       int64(input.ID),
-			"status":   input.Status,
-			"assignee": input.Assignee,
-		})
-		s.hubClient.Send(protocol.WSMessage{
+		if input.Status == nil && input.Assignee == nil && input.ProjectID == nil {
+			return nil, nil, fmt.Errorf("status, assignee, or project_id required")
+		}
+		payload := map[string]any{"id": int64(input.ID)}
+		if input.Status != nil {
+			payload["status"] = *input.Status
+		}
+		if input.Assignee != nil {
+			payload["assignee"] = *input.Assignee
+		}
+		if input.ProjectID != nil {
+			payload["project_id"] = int64(*input.ProjectID)
+		}
+		data, _ := json.Marshal(payload)
+		resp, err := s.hubClient.Request(ctx, protocol.WSMessage{
 			Type: protocol.MsgTaskUpdate,
 			Data: data,
 		})
-		return textResult(fmt.Sprintf("task #%d update sent", int64(input.ID))), nil, nil
+		if err != nil {
+			return nil, nil, err
+		}
+		var result struct {
+			Error string `json:"error"`
+		}
+		json.Unmarshal(resp.Data, &result)
+		if result.Error != "" {
+			return nil, nil, fmt.Errorf("%s", result.Error)
+		}
+		var task protocol.Task
+		json.Unmarshal(resp.Data, &task)
+		assignee := task.Assignee
+		if assignee == "" {
+			assignee = "unassigned"
+		}
+		return textResult(fmt.Sprintf("task #%d updated — status=%s assignee=%s project_id=%d", task.ID, task.Status, assignee, task.ProjectID)), nil, nil
 	})
 
 	gomcp.AddTool(s.mcpServer, &gomcp.Tool{
@@ -1041,7 +1067,7 @@ func (s *Server) registerTools() {
 			return nil, nil, err
 		}
 		var result struct {
-			Task    protocol.Task    `json:"task"`
+			Task    protocol.Task     `json:"task"`
 			Project *protocol.Project `json:"project"`
 		}
 		json.Unmarshal(resp.Data, &result)

@@ -424,6 +424,12 @@ main { flex: 1; display: flex; overflow: hidden; }
   <div style="font-size:11px;color:var(--text3);margin-bottom:8px">
     <span id="taskDetailMeta"></span>
   </div>
+  <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
+    <label for="taskDetailProject" style="font-size:11px;color:var(--text2)">Project</label>
+    <select id="taskDetailProject" style="flex:1;min-width:180px;background:var(--bg3);border:1px solid var(--border);border-radius:4px;padding:5px 8px;color:var(--text);font-size:12px"></select>
+    <button class="btn" style="font-size:10px;padding:3px 8px" onclick="saveTaskProject()">Save project</button>
+    <span id="taskDetailProjectStatus" style="font-size:10px;color:var(--text3);min-width:70px"></span>
+  </div>
   <div id="taskDetailDesc" style="font-size:12px;line-height:1.6;color:var(--text2);max-height:300px;overflow-y:auto;margin-bottom:12px"></div>
   <div style="border-top:1px solid var(--bg3);padding-top:10px;margin-top:8px">
     <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
@@ -1214,14 +1220,54 @@ async function showTaskDetail(id) {
   const t = data.task || data;
   const proj = data.project;
   currentTaskDetailId = t.id;
+  await loadProjects();
   document.getElementById('taskDetailTitle').textContent = '#' + t.id + ' ' + t.title;
   document.getElementById('taskDetailStatus').textContent = t.status;
   const meta = ['Assignee: ' + (t.assignee || 'unassigned'), 'Created by: ' + t.created_by, 'Updated: ' + t.updated_at];
   if (proj) meta.push('Project: ' + proj.name + (proj.path ? ' (' + proj.path + ')' : ''));
   document.getElementById('taskDetailMeta').textContent = meta.join(' · ');
+  populateTaskDetailProjectSelect(t.project_id || 0);
   document.getElementById('taskDetailDesc').innerHTML = t.description ? renderMd(t.description) : '<span style="color:var(--text3)">(no description)</span>';
   loadTaskRunners(t.id);
   showModal('taskDetailModal');
+}
+
+function populateTaskDetailProjectSelect(projectId) {
+  const sel = document.getElementById('taskDetailProject');
+  const status = document.getElementById('taskDetailProjectStatus');
+  if (!sel) return;
+  sel.innerHTML = '<option value="">None</option>' + projects.map(p => `<option value="${p.id}"${p.id === projectId ? ' selected' : ''}>${escHtml(p.name)}</option>`).join('');
+  if (status) status.textContent = '';
+}
+
+async function saveTaskProject() {
+  if (!currentTaskDetailId) return;
+  const sel = document.getElementById('taskDetailProject');
+  const status = document.getElementById('taskDetailProjectStatus');
+  const projectID = sel?.value ? parseInt(sel.value, 10) : 0;
+  if (status) {
+    status.textContent = 'Saving...';
+    status.style.color = 'var(--text3)';
+  }
+  const res = await fetch('/api/tasks/' + currentTaskDetailId, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ project_id: projectID }),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    if (status) {
+      status.textContent = data.error || 'Error';
+      status.style.color = 'var(--red)';
+    }
+    return;
+  }
+  if (status) {
+    status.textContent = 'Saved';
+    status.style.color = 'var(--green)';
+  }
+  await Promise.all([loadTasks(), loadProjects()]);
+  showTaskDetail(currentTaskDetailId);
 }
 
 async function loadTaskRunners(taskId) {

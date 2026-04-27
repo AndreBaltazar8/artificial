@@ -343,7 +343,7 @@ func (h *Hub) handleRunnerComplete(c *client, msg protocol.WSMessage) {
 	// review. Commander can move it to done once they've inspected
 	// the runner's branch.
 	inQA := "in_qa"
-	h.db.UpdateTask(tr.TaskID, &inQA, nil)
+	h.db.UpdateTask(tr.TaskID, &inQA, nil, nil)
 
 	if tr.ParentNick != "" && tr.ParentNick != "commander" {
 		h.sendTo(tr.ParentNick, protocol.WSMessage{
@@ -604,9 +604,10 @@ func (h *Hub) handleTaskCreate(c *client, msg protocol.WSMessage) {
 
 func (h *Hub) handleTaskUpdate(c *client, msg protocol.WSMessage) {
 	var input struct {
-		ID       int64   `json:"id"`
-		Status   *string `json:"status"`
-		Assignee *string `json:"assignee"`
+		ID        int64   `json:"id"`
+		Status    *string `json:"status"`
+		Assignee  *string `json:"assignee"`
+		ProjectID *int64  `json:"project_id"`
 	}
 	if msg.Data != nil {
 		json.Unmarshal(msg.Data, &input)
@@ -615,7 +616,27 @@ func (h *Hub) handleTaskUpdate(c *client, msg protocol.WSMessage) {
 		input.ID = msg.ID
 	}
 	if input.ID == 0 {
+		if msg.RequestID != "" {
+			h.sendTo(c.nick, protocol.WSMessage{
+				Type:      msg.Type,
+				RequestID: msg.RequestID,
+				Data:      json.RawMessage(`{"error":"task id required"}`),
+			})
+		}
 		return
+	}
+	if input.ProjectID != nil && *input.ProjectID > 0 {
+		if _, err := h.db.GetProject(*input.ProjectID); err != nil {
+			slog.Error("update task project", "task_id", input.ID, "project_id", *input.ProjectID, "err", err)
+			if msg.RequestID != "" {
+				h.sendTo(c.nick, protocol.WSMessage{
+					Type:      msg.Type,
+					RequestID: msg.RequestID,
+					Data:      json.RawMessage(`{"error":"project_id does not match an existing project"}`),
+				})
+			}
+			return
+		}
 	}
 
 	// If assignee is changing, auto-subscribe the new assignee
@@ -625,9 +646,16 @@ func (h *Hub) handleTaskUpdate(c *client, msg protocol.WSMessage) {
 		}
 	}
 
-	task, err := h.db.UpdateTask(input.ID, input.Status, input.Assignee)
+	task, err := h.db.UpdateTask(input.ID, input.Status, input.Assignee, input.ProjectID)
 	if err != nil {
 		slog.Error("update task", "err", err)
+		if msg.RequestID != "" {
+			h.sendTo(c.nick, protocol.WSMessage{
+				Type:      msg.Type,
+				RequestID: msg.RequestID,
+				Data:      json.RawMessage(fmt.Sprintf(`{"error":%q}`, err.Error())),
+			})
+		}
 		return
 	}
 
@@ -643,6 +671,13 @@ func (h *Hub) handleTaskUpdate(c *client, msg protocol.WSMessage) {
 		}
 		actions = append(actions, "assignee="+a)
 	}
+	if input.ProjectID != nil {
+		if *input.ProjectID > 0 {
+			actions = append(actions, fmt.Sprintf("project_id=%d", *input.ProjectID))
+		} else {
+			actions = append(actions, "project=none")
+		}
+	}
 	action := "updated"
 	if len(actions) > 0 {
 		action = strings.Join(actions, ", ")
@@ -657,6 +692,14 @@ func (h *Hub) handleTaskUpdate(c *client, msg protocol.WSMessage) {
 		Data: data,
 		Text: action,
 	}, "")
+	if msg.RequestID != "" {
+		fullData, _ := json.Marshal(task)
+		h.sendTo(c.nick, protocol.WSMessage{
+			Type:      msg.Type,
+			RequestID: msg.RequestID,
+			Data:      fullData,
+		})
+	}
 }
 
 func (h *Hub) handleTaskList(c *client, msg protocol.WSMessage) {

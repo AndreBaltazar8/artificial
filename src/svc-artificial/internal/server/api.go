@@ -1092,15 +1092,22 @@ func (s *Server) apiGetTask(w http.ResponseWriter, r *http.Request) {
 func (s *Server) apiUpdateTask(w http.ResponseWriter, r *http.Request) {
 	id := pathID(r, "id")
 	var input struct {
-		Status   *string `json:"status"`
-		Assignee *string `json:"assignee"`
+		Status    *string `json:"status"`
+		Assignee  *string `json:"assignee"`
+		ProjectID *int64  `json:"project_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
 		writeErr(w, 400, "invalid json")
 		return
 	}
+	if input.ProjectID != nil && *input.ProjectID > 0 {
+		if _, err := s.DB.GetProject(*input.ProjectID); err != nil {
+			writeErr(w, 400, "project_id does not match an existing project")
+			return
+		}
+	}
 	prev, _ := s.DB.GetTask(id)
-	task, err := s.DB.UpdateTask(id, input.Status, input.Assignee)
+	task, err := s.DB.UpdateTask(id, input.Status, input.Assignee, input.ProjectID)
 	if err != nil {
 		writeErr(w, 500, err.Error())
 		return

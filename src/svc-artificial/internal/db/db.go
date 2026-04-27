@@ -856,18 +856,34 @@ func (d *DB) CreateTask(title, description, assignee string, projectID int64, cr
 	}, nil
 }
 
-// UpdateTask updates a task's status and/or assignee.
-func (d *DB) UpdateTask(id int64, status, assignee *string) (protocol.Task, error) {
+// UpdateTask updates a task's mutable fields. projectID <= 0 clears the assignment.
+func (d *DB) UpdateTask(id int64, status, assignee *string, projectID *int64) (protocol.Task, error) {
 	ts := now()
+	var sets []string
+	var args []any
 	if status != nil {
-		if _, err := d.db.Exec(`UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?`, *status, ts, id); err != nil {
-			return protocol.Task{}, err
-		}
+		sets = append(sets, "status = ?")
+		args = append(args, *status)
 	}
 	if assignee != nil {
-		if _, err := d.db.Exec(`UPDATE tasks SET assignee = ?, updated_at = ? WHERE id = ?`, *assignee, ts, id); err != nil {
-			return protocol.Task{}, err
+		sets = append(sets, "assignee = ?")
+		args = append(args, *assignee)
+	}
+	if projectID != nil {
+		sets = append(sets, "project_id = ?")
+		if *projectID > 0 {
+			args = append(args, *projectID)
+		} else {
+			args = append(args, nil)
 		}
+	}
+	if len(sets) == 0 {
+		return d.GetTask(id)
+	}
+	sets = append(sets, "updated_at = ?")
+	args = append(args, ts, id)
+	if _, err := d.db.Exec(`UPDATE tasks SET `+strings.Join(sets, ", ")+` WHERE id = ?`, args...); err != nil {
+		return protocol.Task{}, err
 	}
 	return d.GetTask(id)
 }
