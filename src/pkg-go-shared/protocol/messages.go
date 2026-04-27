@@ -21,19 +21,19 @@ type WSMessage struct {
 
 // WebSocket message types (client → server).
 const (
-	MsgChatSend     = "chat_send"
-	MsgChatDM       = "chat_dm"
-	MsgJoinChannel  = "join_channel"
-	MsgLeaveChannel = "leave_channel"
-	MsgSetTopic     = "set_topic"
-	MsgGetMembers   = "get_members"
-	MsgListChannels = "list_channels"
-	MsgMarkRead       = "mark_read"
-	MsgChannelGrep    = "channel_grep"
-	MsgChannelMessage = "channel_message"
-	MsgChannelHistory = "channel_history"
-	MsgWorkerNotify  = "worker_notify"  // send a channel notification directly to a worker
-	MsgWorkerCommand  = "worker_command"  // send a slash command (e.g. /compact) to a worker's claude
+	MsgChatSend        = "chat_send"
+	MsgChatDM          = "chat_dm"
+	MsgJoinChannel     = "join_channel"
+	MsgLeaveChannel    = "leave_channel"
+	MsgSetTopic        = "set_topic"
+	MsgGetMembers      = "get_members"
+	MsgListChannels    = "list_channels"
+	MsgMarkRead        = "mark_read"
+	MsgChannelGrep     = "channel_grep"
+	MsgChannelMessage  = "channel_message"
+	MsgChannelHistory  = "channel_history"
+	MsgWorkerNotify    = "worker_notify"     // send a channel notification directly to a worker
+	MsgWorkerCommand   = "worker_command"    // send a slash command (e.g. /compact) to a worker's claude
 	MsgWorkerTTYInput  = "worker_tty_input"  // send raw keystrokes to a worker's PTY
 	MsgWorkerTTYResize = "worker_tty_resize" // resize a worker's PTY (cols/rows in Text as "COLSxROWS")
 )
@@ -63,16 +63,16 @@ const (
 
 // WebSocket message types (server → client broadcasts).
 const (
-	MsgMessage      = "message"
-	MsgDM           = "dm"
-	MsgMemberJoined = "member_joined"
-	MsgMemberLeft   = "member_left"
-	MsgTopicChanged = "topic_changed"
-	MsgUnread       = "unread_messages"
-	MsgTaskCreated   = "task_created"
-	MsgTaskUpdated   = "task_updated"
-	MsgWorkerOnline  = "worker_online"
-	MsgWorkerOffline = "worker_offline"
+	MsgMessage         = "message"
+	MsgDM              = "dm"
+	MsgMemberJoined    = "member_joined"
+	MsgMemberLeft      = "member_left"
+	MsgTopicChanged    = "topic_changed"
+	MsgUnread          = "unread_messages"
+	MsgTaskCreated     = "task_created"
+	MsgTaskUpdated     = "task_updated"
+	MsgWorkerOnline    = "worker_online"
+	MsgWorkerOffline   = "worker_offline"
 	MsgChannelCreated  = "channel_created"
 	MsgProjectCreated  = "project_created"
 	MsgReviewCreated   = "review_created"
@@ -101,19 +101,31 @@ const (
 // in the employees table; their lifecycle is tracked in task_runners.
 //
 // runner → server:
-//   MsgRunnerCheckpoint: progress signal (commit hash, summary).
-//   MsgRunnerBlocked:    runner needs human/manager input; surfaces in dashboard.
-//   MsgRunnerComplete:   work is done, branch committed; runner will exit.
+//
+//	MsgRunnerCheckpoint: progress signal (commit hash, summary).
+//	MsgRunnerBlocked:    runner needs human/manager input; surfaces in dashboard.
+//	MsgRunnerComplete:   work is done, branch committed; runner will exit.
 //
 // server → manager (the worker that owns the task or commander):
-//   MsgRunnerSpawned:    a runner has been spawned for a task.
-//   MsgRunnerStatus:     state changed (running, blocked, complete, crashed).
+//
+//	MsgRunnerSpawned:    a runner has been spawned for a task.
+//	MsgRunnerStatus:     state changed (running, blocked, complete, crashed).
 const (
 	MsgRunnerCheckpoint = "runner_checkpoint"
 	MsgRunnerBlocked    = "runner_blocked"
 	MsgRunnerComplete   = "runner_complete"
 	MsgRunnerSpawned    = "runner_spawned"
 	MsgRunnerStatus     = "runner_status"
+)
+
+// WebSocket message types for long-lived worker management of task runners.
+// These are manager-facing controls, distinct from the runner-originated
+// lifecycle events above.
+const (
+	MsgTaskRunnerSpawn  = "task_runner_spawn"
+	MsgTaskRunnerList   = "task_runner_list"
+	MsgTaskRunnerGet    = "task_runner_get"
+	MsgTaskRunnerCancel = "task_runner_cancel"
 )
 
 // WebSocket message types for plugin CRUD (dashboard → server).

@@ -1,10 +1,13 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -275,4 +278,171 @@ func waitForActiveRunner(t *testing.T, database *db.DB, taskID int64) protocol.T
 	}
 	t.Fatalf("active runner was not created for task %d: %v", taskID, lastErr)
 	return protocol.TaskRunner{}
+}
+
+func TestTaskRunnerManagementSpawnListCancel(t *testing.T) {
+	database, hub, task := newRunnerManagementFixture(t)
+
+	spawn := sendRunnerManagement(t, hub, "manager", protocol.MsgTaskRunnerSpawn, protocol.TaskRunnerSpawnRequest{TaskID: task.ID})
+	if spawn.Runner == nil {
+		t.Fatalf("spawn returned no runner: %+v", spawn)
+	}
+	if spawn.Runner.ParentNick != "manager" {
+		t.Fatalf("spawn parent = %q, want manager", spawn.Runner.ParentNick)
+	}
+
+	list := sendRunnerManagement(t, hub, "manager", protocol.MsgTaskRunnerList, protocol.TaskRunnerListRequest{})
+	if len(list.Runners) != 1 || list.Runners[0].ID != spawn.Runner.ID {
+		t.Fatalf("active list = %+v, want spawned runner", list.Runners)
+	}
+
+	get := sendRunnerManagement(t, hub, "manager", protocol.MsgTaskRunnerGet, protocol.TaskRunnerGetRequest{TaskID: task.ID})
+	if get.Runner == nil || get.Runner.ID != spawn.Runner.ID {
+		t.Fatalf("get by task = %+v, want spawned runner", get.Runner)
+	}
+
+	cancel := sendRunnerManagement(t, hub, "manager", protocol.MsgTaskRunnerCancel, protocol.TaskRunnerCancelRequest{RunnerID: spawn.Runner.ID})
+	if cancel.Runner == nil || cancel.Runner.Status != protocol.RunnerStatusCancelled {
+		t.Fatalf("cancel = %+v, want cancelled runner", cancel.Runner)
+	}
+	updated, err := database.GetTaskRunner(spawn.Runner.ID)
+	if err != nil {
+		t.Fatalf("get cancelled runner: %v", err)
+	}
+	if updated.Status != protocol.RunnerStatusCancelled {
+		t.Fatalf("database status = %q, want cancelled", updated.Status)
+	}
+}
+
+func TestTaskRunnerManagementPermissions(t *testing.T) {
+	database, hub, task := newRunnerManagementFixture(t)
+	runner, err := database.CreateTaskRunner(task.ID, "runner-owned", "manager", "/tmp/worktree", "runner/test", "master", "")
+	if err != nil {
+		t.Fatalf("create runner: %v", err)
+	}
+
+	otherCancel := sendRunnerManagementAllowError(t, hub, "other", protocol.MsgTaskRunnerCancel, protocol.TaskRunnerCancelRequest{RunnerID: runner.ID})
+	if !strings.Contains(otherCancel.Error, "owned by manager") {
+		t.Fatalf("other cancel error = %q, want ownership error", otherCancel.Error)
+	}
+	unchanged, err := database.GetTaskRunner(runner.ID)
+	if err != nil {
+		t.Fatalf("get runner: %v", err)
+	}
+	if unchanged.Status != protocol.RunnerStatusRunning {
+		t.Fatalf("unauthorized cancel changed status to %q", unchanged.Status)
+	}
+
+	override := sendRunnerManagementAllowError(t, hub, "manager", protocol.MsgTaskRunnerSpawn, protocol.TaskRunnerSpawnRequest{
+		TaskID:     task.ID,
+		ParentNick: "other",
+	})
+	if !strings.Contains(override.Error, "parent_nick override") {
+		t.Fatalf("parent override error = %q", override.Error)
+	}
+
+	runnerList := sendRunnerManagementAllowError(t, hub, "runner-t1-test", protocol.MsgTaskRunnerList, protocol.TaskRunnerListRequest{})
+	if !strings.Contains(runnerList.Error, "not available to task runners") {
+		t.Fatalf("runner identity error = %q", runnerList.Error)
+	}
+
+	ceoCancel := sendRunnerManagement(t, hub, "boss", protocol.MsgTaskRunnerCancel, protocol.TaskRunnerCancelRequest{RunnerID: runner.ID})
+	if ceoCancel.Runner == nil || ceoCancel.Runner.Status != protocol.RunnerStatusCancelled {
+		t.Fatalf("ceo cancel = %+v, want cancelled", ceoCancel.Runner)
+	}
+
+	ceoSpawn := sendRunnerManagement(t, hub, "boss", protocol.MsgTaskRunnerSpawn, protocol.TaskRunnerSpawnRequest{
+		TaskID:     task.ID,
+		ParentNick: "other",
+	})
+	if ceoSpawn.Runner == nil || ceoSpawn.Runner.ParentNick != "other" {
+		t.Fatalf("ceo parent override = %+v, want parent other", ceoSpawn.Runner)
+	}
+}
+
+func newRunnerManagementFixture(t *testing.T) (*db.DB, *Hub, protocol.Task) {
+	t.Helper()
+	database, err := db.Open(filepath.Join(t.TempDir(), "artificial.db"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	t.Cleanup(func() { database.Close() })
+	if _, err := database.CreateEmployee("manager", "worker", "manager", ""); err != nil {
+		t.Fatalf("create manager: %v", err)
+	}
+	if _, err := database.CreateEmployee("other", "worker", "other", ""); err != nil {
+		t.Fatalf("create other: %v", err)
+	}
+	if _, err := database.CreateEmployee("boss", "ceo", "boss", ""); err != nil {
+		t.Fatalf("create boss: %v", err)
+	}
+	project, err := database.CreateProject("test", t.TempDir(), "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	task, err := database.CreateTask("runner task", "do work", "manager", project.ID, "commander")
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+
+	hub := NewHub(database, 0)
+	spawnCount := 0
+	hub.spawnRunnerForTask = func(taskID int64, parentNick string) (protocol.TaskRunner, error) {
+		if _, err := database.GetTask(taskID); err != nil {
+			return protocol.TaskRunner{}, fmt.Errorf("task not found: %w", err)
+		}
+		if existing, err := database.GetActiveRunnerForTask(taskID); err == nil {
+			return protocol.TaskRunner{}, fmt.Errorf("task already has active runner %q (id=%d, status=%s)", existing.Nickname, existing.ID, existing.Status)
+		}
+		spawnCount++
+		return database.CreateTaskRunner(
+			taskID,
+			fmt.Sprintf("runner-test-%d", spawnCount),
+			parentNick,
+			"/tmp/worktree",
+			fmt.Sprintf("runner/test-%d", spawnCount),
+			"master",
+			"",
+		)
+	}
+	return database, hub, task
+}
+
+func sendRunnerManagement(t *testing.T, hub *Hub, nick, typ string, payload any) protocol.TaskRunnerManageResponse {
+	t.Helper()
+	resp := sendRunnerManagementAllowError(t, hub, nick, typ, payload)
+	if resp.Error != "" {
+		t.Fatalf("%s returned error: %s", typ, resp.Error)
+	}
+	return resp
+}
+
+func sendRunnerManagementAllowError(t *testing.T, hub *Hub, nick, typ string, payload any) protocol.TaskRunnerManageResponse {
+	t.Helper()
+	var replies []protocol.WSMessage
+	hub.sendHook = func(to string, msg protocol.WSMessage) bool {
+		if to == nick {
+			replies = append(replies, msg)
+		}
+		return true
+	}
+	defer func() { hub.sendHook = nil }()
+
+	data, _ := json.Marshal(payload)
+	hub.handleMessage(context.Background(), &client{nick: nick}, protocol.WSMessage{
+		Type:      typ,
+		RequestID: "test-request",
+		Data:      data,
+	})
+	if len(replies) != 1 {
+		t.Fatalf("got %d replies, want 1", len(replies))
+	}
+	if replies[0].RequestID != "test-request" {
+		t.Fatalf("reply request id = %q, want test-request", replies[0].RequestID)
+	}
+	var resp protocol.TaskRunnerManageResponse
+	if err := json.Unmarshal(replies[0].Data, &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	return resp
 }

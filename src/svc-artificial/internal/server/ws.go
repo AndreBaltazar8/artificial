@@ -3,7 +3,9 @@ package server
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -28,13 +30,16 @@ type client struct {
 
 // Hub manages WebSocket connections and message routing.
 type Hub struct {
-	db                     *db.DB
-	port                   int
-	mu                     sync.RWMutex
-	clients                map[string]*client // nick → client
-	pluginState            *pluginStateStore  // aggregated plugin runtime state from worker reports
-	pluginHost             *pluginhost.Host   // host-scope plugins spawned in this process
+	db          *db.DB
+	port        int
+	mu          sync.RWMutex
+	clients     map[string]*client // nick → client
+	pluginState *pluginStateStore  // aggregated plugin runtime state from worker reports
+	pluginHost  *pluginhost.Host   // host-scope plugins spawned in this process
+
 	autoSpawnRunnerForTask func(taskID int64, parentNick string)
+	spawnRunnerForTask     func(taskID int64, parentNick string) (protocol.TaskRunner, error)
+	sendHook               func(nick string, msg protocol.WSMessage) bool
 }
 
 // NewHub creates a new WebSocket hub.
@@ -156,6 +161,14 @@ func (h *Hub) handleMessage(ctx context.Context, c *client, msg protocol.WSMessa
 		h.handleTaskSubscribe(c, msg)
 	case protocol.MsgTaskGrep:
 		h.handleTaskGrep(c, msg)
+	case protocol.MsgTaskRunnerSpawn:
+		h.handleTaskRunnerSpawn(c, msg)
+	case protocol.MsgTaskRunnerList:
+		h.handleTaskRunnerList(c, msg)
+	case protocol.MsgTaskRunnerGet:
+		h.handleTaskRunnerGet(c, msg)
+	case protocol.MsgTaskRunnerCancel:
+		h.handleTaskRunnerCancel(c, msg)
 	case protocol.MsgReviewCreate:
 		h.handleReviewCreate(c, msg)
 	case protocol.MsgReviewRespond:
@@ -367,6 +380,257 @@ func (h *Hub) handleRunnerComplete(c *client, msg protocol.WSMessage) {
 		})
 	}
 
+	data, _ := json.Marshal(tr)
+	h.broadcast(protocol.WSMessage{Type: protocol.MsgRunnerStatus, Data: data}, "")
+}
+
+// ── Runner Management (long-lived workers) ──────────────────────────────
+
+func (h *Hub) handleTaskRunnerSpawn(c *client, msg protocol.WSMessage) {
+	_, privileged, ok := h.authorizeRunnerManager(c, msg)
+	if !ok {
+		return
+	}
+	var input protocol.TaskRunnerSpawnRequest
+	if msg.Data != nil {
+		json.Unmarshal(msg.Data, &input)
+	}
+	if input.TaskID == 0 {
+		input.TaskID = msg.ID
+	}
+	if input.TaskID == 0 {
+		h.replyRunnerError(c, msg, "task_id required")
+		return
+	}
+
+	parentNick := strings.TrimSpace(input.ParentNick)
+	if !privileged {
+		if parentNick != "" && parentNick != c.nick {
+			h.replyRunnerError(c, msg, "parent_nick override is restricted to commander/CEO")
+			return
+		}
+		parentNick = c.nick
+	} else if parentNick == "" {
+		parentNick = c.nick
+	}
+
+	if h.spawnRunnerForTask == nil {
+		h.replyRunnerError(c, msg, "runner spawn is unavailable")
+		return
+	}
+	runner, err := h.spawnRunnerForTask(input.TaskID, parentNick)
+	if err != nil {
+		h.replyRunnerError(c, msg, "spawn runner failed: "+err.Error())
+		return
+	}
+	h.replyRunner(c, msg, protocol.TaskRunnerManageResponse{
+		Runner:  &runner,
+		Message: fmt.Sprintf("spawned runner #%d for task #%d (parent=%s)", runner.ID, runner.TaskID, runner.ParentNick),
+	})
+}
+
+func (h *Hub) handleTaskRunnerList(c *client, msg protocol.WSMessage) {
+	if _, _, ok := h.authorizeRunnerManager(c, msg); !ok {
+		return
+	}
+	var input protocol.TaskRunnerListRequest
+	if msg.Data != nil {
+		json.Unmarshal(msg.Data, &input)
+	}
+	if input.TaskID == 0 {
+		input.TaskID = msg.ID
+	}
+
+	var (
+		runners []protocol.TaskRunner
+		err     error
+		message string
+	)
+	if input.TaskID > 0 {
+		if _, err := h.db.GetTask(input.TaskID); err != nil {
+			h.replyRunnerError(c, msg, fmt.Sprintf("task #%d not found", input.TaskID))
+			return
+		}
+		runners, err = h.db.ListRunnersForTask(input.TaskID)
+		message = fmt.Sprintf("%d runner(s) for task #%d", len(runners), input.TaskID)
+		if len(runners) == 0 {
+			message = fmt.Sprintf("no runners for task #%d", input.TaskID)
+		}
+	} else {
+		runners, err = h.db.ListActiveRunners()
+		message = fmt.Sprintf("%d active runner(s)", len(runners))
+		if len(runners) == 0 {
+			message = "no active runners"
+		}
+	}
+	if err != nil {
+		h.replyRunnerError(c, msg, err.Error())
+		return
+	}
+	h.replyRunner(c, msg, protocol.TaskRunnerManageResponse{Runners: runners, Message: message})
+}
+
+func (h *Hub) handleTaskRunnerGet(c *client, msg protocol.WSMessage) {
+	if _, _, ok := h.authorizeRunnerManager(c, msg); !ok {
+		return
+	}
+	var input protocol.TaskRunnerGetRequest
+	if msg.Data != nil {
+		json.Unmarshal(msg.Data, &input)
+	}
+	if input.RunnerID == 0 {
+		input.RunnerID = msg.ID
+	}
+	if input.RunnerID == 0 && input.TaskID == 0 {
+		h.replyRunnerError(c, msg, "runner_id or task_id required")
+		return
+	}
+
+	runner, message, err := h.lookupRunnerForInspect(input.RunnerID, input.TaskID)
+	if err != nil {
+		h.replyRunnerError(c, msg, err.Error())
+		return
+	}
+	h.replyRunner(c, msg, protocol.TaskRunnerManageResponse{Runner: &runner, Message: message})
+}
+
+func (h *Hub) handleTaskRunnerCancel(c *client, msg protocol.WSMessage) {
+	_, privileged, ok := h.authorizeRunnerManager(c, msg)
+	if !ok {
+		return
+	}
+	var input protocol.TaskRunnerCancelRequest
+	if msg.Data != nil {
+		json.Unmarshal(msg.Data, &input)
+	}
+	if input.RunnerID == 0 {
+		input.RunnerID = msg.ID
+	}
+	if input.RunnerID == 0 && input.TaskID == 0 {
+		h.replyRunnerError(c, msg, "runner_id or task_id required")
+		return
+	}
+
+	runner, err := h.lookupRunnerForCancel(input.RunnerID, input.TaskID)
+	if err != nil {
+		h.replyRunnerError(c, msg, err.Error())
+		return
+	}
+	if !isActiveRunnerStatus(runner.Status) {
+		h.replyRunnerError(c, msg, fmt.Sprintf("runner #%d is not active (status=%s)", runner.ID, runner.Status))
+		return
+	}
+	if !privileged && runner.ParentNick != c.nick {
+		owner := runner.ParentNick
+		if owner == "" {
+			owner = "commander"
+		}
+		h.replyRunnerError(c, msg, fmt.Sprintf("runner #%d is owned by %s; cancel requires that manager or commander/CEO", runner.ID, owner))
+		return
+	}
+
+	updated, err := cancelTaskRunner(h.db, runner.ID, h.broadcastRunnerStatus)
+	if err != nil {
+		h.replyRunnerError(c, msg, "cancel runner failed: "+err.Error())
+		return
+	}
+	h.replyRunner(c, msg, protocol.TaskRunnerManageResponse{
+		Runner:  &updated,
+		Message: fmt.Sprintf("cancelled runner #%d for task #%d", updated.ID, updated.TaskID),
+	})
+}
+
+func (h *Hub) authorizeRunnerManager(c *client, msg protocol.WSMessage) (protocol.Employee, bool, bool) {
+	if c == nil || c.nick == "" {
+		h.replyRunnerError(c, msg, "runner management requires a long-lived worker identity")
+		return protocol.Employee{}, false, false
+	}
+	if strings.HasPrefix(c.nick, "runner-") {
+		h.replyRunnerError(c, msg, "runner management tools are not available to task runners")
+		return protocol.Employee{}, false, false
+	}
+	caller, err := h.db.GetEmployeeByNick(c.nick)
+	if err != nil {
+		h.replyRunnerError(c, msg, "runner management requires a registered long-lived worker")
+		return protocol.Employee{}, false, false
+	}
+	switch caller.Role {
+	case "worker":
+		return caller, false, true
+	case "ceo", "commander":
+		return caller, true, true
+	default:
+		h.replyRunnerError(c, msg, "runner management is restricted to workers, CEO, and commander")
+		return protocol.Employee{}, false, false
+	}
+}
+
+func (h *Hub) lookupRunnerForInspect(runnerID, taskID int64) (protocol.TaskRunner, string, error) {
+	if runnerID > 0 {
+		runner, err := h.db.GetTaskRunner(runnerID)
+		if err != nil {
+			return protocol.TaskRunner{}, "", fmt.Errorf("runner #%d not found", runnerID)
+		}
+		return runner, fmt.Sprintf("runner #%d", runner.ID), nil
+	}
+	if _, err := h.db.GetTask(taskID); err != nil {
+		return protocol.TaskRunner{}, "", fmt.Errorf("task #%d not found", taskID)
+	}
+	runner, err := h.db.GetActiveRunnerForTask(taskID)
+	if err == nil {
+		return runner, fmt.Sprintf("active runner for task #%d", taskID), nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return protocol.TaskRunner{}, "", err
+	}
+	runners, err := h.db.ListRunnersForTask(taskID)
+	if err != nil {
+		return protocol.TaskRunner{}, "", err
+	}
+	if len(runners) == 0 {
+		return protocol.TaskRunner{}, "", fmt.Errorf("no runners for task #%d", taskID)
+	}
+	return runners[0], fmt.Sprintf("latest runner for task #%d (no active runner)", taskID), nil
+}
+
+func (h *Hub) lookupRunnerForCancel(runnerID, taskID int64) (protocol.TaskRunner, error) {
+	if runnerID > 0 {
+		runner, err := h.db.GetTaskRunner(runnerID)
+		if err != nil {
+			return protocol.TaskRunner{}, fmt.Errorf("runner #%d not found", runnerID)
+		}
+		return runner, nil
+	}
+	if _, err := h.db.GetTask(taskID); err != nil {
+		return protocol.TaskRunner{}, fmt.Errorf("task #%d not found", taskID)
+	}
+	runner, err := h.db.GetActiveRunnerForTask(taskID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return protocol.TaskRunner{}, fmt.Errorf("task #%d has no active runner", taskID)
+		}
+		return protocol.TaskRunner{}, err
+	}
+	return runner, nil
+}
+
+func (h *Hub) replyRunnerError(c *client, msg protocol.WSMessage, message string) {
+	h.replyRunner(c, msg, protocol.TaskRunnerManageResponse{Error: message})
+}
+
+func (h *Hub) replyRunner(c *client, msg protocol.WSMessage, resp protocol.TaskRunnerManageResponse) {
+	if c == nil || c.nick == "" {
+		return
+	}
+	data, _ := json.Marshal(resp)
+	h.sendTo(c.nick, protocol.WSMessage{
+		Type:      msg.Type,
+		RequestID: msg.RequestID,
+		Data:      data,
+	})
+}
+
+func (h *Hub) broadcastRunnerStatus(tr protocol.TaskRunner) {
 	data, _ := json.Marshal(tr)
 	h.broadcast(protocol.WSMessage{Type: protocol.MsgRunnerStatus, Data: data}, "")
 }
@@ -1595,6 +1859,9 @@ func (h *Hub) broadcastToChannel(channel string, msg protocol.WSMessage, skipNic
 
 // sendTo sends a message to a specific client by nick.
 func (h *Hub) sendTo(nick string, msg protocol.WSMessage) {
+	if h.sendHook != nil && h.sendHook(nick, msg) {
+		return
+	}
 	data, err := json.Marshal(msg)
 	if err != nil {
 		return

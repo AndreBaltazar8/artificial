@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"artificial.pt/pkg-go-shared/protocol"
+	"artificial.pt/svc-artificial/internal/db"
 )
 
 // registerRunnerAPI mounts every HTTP route used by the ephemeral
@@ -573,20 +574,51 @@ func (s *Server) apiRunnerStatus(w http.ResponseWriter, r *http.Request) {
 // for inspection — the manager decides whether to discard or salvage.
 func (s *Server) apiCancelRunner(w http.ResponseWriter, r *http.Request) {
 	id := pathID(r, "id")
-	tr, err := s.DB.GetTaskRunner(id)
-	if err != nil {
-		writeErr(w, 404, "not found")
+	if _, err := s.cancelRunner(id); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeErr(w, 404, "not found")
+			return
+		}
+		writeErr(w, 500, err.Error())
 		return
+	}
+	w.WriteHeader(204)
+}
+
+func (s *Server) cancelRunner(id int64) (protocol.TaskRunner, error) {
+	return cancelTaskRunner(s.DB, id, s.broadcastRunnerStatus)
+}
+
+func cancelTaskRunner(database *db.DB, id int64, broadcast func(protocol.TaskRunner)) (protocol.TaskRunner, error) {
+	tr, err := database.GetTaskRunner(id)
+	if err != nil {
+		return protocol.TaskRunner{}, err
 	}
 	if tr.PID > 0 {
 		if proc, err := os.FindProcess(tr.PID); err == nil {
 			proc.Signal(syscall.SIGTERM)
 		}
 	}
-	s.DB.UpdateTaskRunnerStatus(id, protocol.RunnerStatusCancelled)
-	updated, _ := s.DB.GetTaskRunner(id)
-	s.broadcastRunnerStatus(updated)
-	w.WriteHeader(204)
+	if err := database.UpdateTaskRunnerStatus(id, protocol.RunnerStatusCancelled); err != nil {
+		return protocol.TaskRunner{}, err
+	}
+	updated, err := database.GetTaskRunner(id)
+	if err != nil {
+		return protocol.TaskRunner{}, err
+	}
+	if broadcast != nil {
+		broadcast(updated)
+	}
+	return updated, nil
+}
+
+func isActiveRunnerStatus(status string) bool {
+	switch status {
+	case protocol.RunnerStatusRunning, protocol.RunnerStatusBlocked:
+		return true
+	default:
+		return false
+	}
 }
 
 // apiListRunnersForTask returns every runner ever spawned for a task,

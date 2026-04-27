@@ -56,6 +56,43 @@ type RunnerBlockedPayload struct {
 	Question string `json:"question,omitempty"`
 }
 
+// TaskRunnerSpawnRequest is sent by long-lived workers that want the server to
+// create an ephemeral runner for a task. ParentNick is a privileged override;
+// ordinary workers are always set as their own runner parent.
+type TaskRunnerSpawnRequest struct {
+	TaskID     int64  `json:"task_id"`
+	ParentNick string `json:"parent_nick,omitempty"`
+}
+
+// TaskRunnerListRequest lists active runners globally when TaskID is zero, or
+// a single task's runner history when TaskID is set.
+type TaskRunnerListRequest struct {
+	TaskID int64 `json:"task_id,omitempty"`
+}
+
+// TaskRunnerGetRequest inspects a runner by runner ID, or the active/latest
+// runner for a task when TaskID is supplied instead.
+type TaskRunnerGetRequest struct {
+	RunnerID int64 `json:"runner_id,omitempty"`
+	TaskID   int64 `json:"task_id,omitempty"`
+}
+
+// TaskRunnerCancelRequest cancels a runner by runner ID, or the active runner
+// for a task when TaskID is supplied instead.
+type TaskRunnerCancelRequest struct {
+	RunnerID int64 `json:"runner_id,omitempty"`
+	TaskID   int64 `json:"task_id,omitempty"`
+}
+
+// TaskRunnerManageResponse is the common response body for manager-facing
+// task-runner WS operations.
+type TaskRunnerManageResponse struct {
+	Runner  *TaskRunner  `json:"runner,omitempty"`
+	Runners []TaskRunner `json:"runners,omitempty"`
+	Message string       `json:"message,omitempty"`
+	Error   string       `json:"error,omitempty"`
+}
+
 // DMChannelName returns the canonical DM channel name for two nicknames.
 // Nicks are sorted alphabetically so dm:alice:bob == dm:bob:alice.
 func DMChannelName(a, b string) string {

@@ -472,6 +472,25 @@ type taskGrepInput struct {
 	Query string `json:"query" jsonschema:"Search query to match against task title and description"`
 }
 
+type runnerSpawnInput struct {
+	TaskID     flexID `json:"task_id" jsonschema:"Task ID to run in an isolated runner worktree"`
+	ParentNick string `json:"parent_nick,omitempty" jsonschema:"Privileged override for the manager nickname. Ordinary workers are always set as their own parent."`
+}
+
+type runnerListInput struct {
+	TaskID flexID `json:"task_id,omitempty" jsonschema:"Optional task ID. If omitted, lists active runners. If set, lists that task's runner history."`
+}
+
+type runnerGetInput struct {
+	ID     flexID `json:"id,omitempty" jsonschema:"Runner ID to inspect"`
+	TaskID flexID `json:"task_id,omitempty" jsonschema:"Task ID whose active or latest runner should be inspected, used when id is omitted"`
+}
+
+type runnerCancelInput struct {
+	ID     flexID `json:"id,omitempty" jsonschema:"Runner ID to cancel"`
+	TaskID flexID `json:"task_id,omitempty" jsonschema:"Task ID whose active runner should be cancelled, used when id is omitted"`
+}
+
 func (s *Server) registerTools() {
 	gomcp.AddTool(s.mcpServer, &gomcp.Tool{
 		Name:        "chat_send",
@@ -1223,6 +1242,152 @@ func (s *Server) registerTools() {
 		}
 		return textResult(fmt.Sprintf("%d match(es):\n%s", len(tasks), lines)), nil, nil
 	})
+
+	// ── Task Runner Tools ──
+
+	gomcp.AddTool(s.mcpServer, &gomcp.Tool{
+		Name: "runner_spawn",
+		Description: "Spawn an isolated task runner for a task. The caller becomes the runner parent/manager; " +
+			"parent_nick is only honored for privileged commander/CEO contexts.",
+	}, func(ctx context.Context, req *gomcp.CallToolRequest, input runnerSpawnInput) (*gomcp.CallToolResult, any, error) {
+		if input.TaskID == 0 {
+			return nil, nil, fmt.Errorf("task_id required")
+		}
+		data, _ := json.Marshal(protocol.TaskRunnerSpawnRequest{
+			TaskID:     int64(input.TaskID),
+			ParentNick: input.ParentNick,
+		})
+		resp, err := s.hubClient.Request(ctx, protocol.WSMessage{
+			Type: protocol.MsgTaskRunnerSpawn,
+			Data: data,
+		})
+		if err != nil {
+			return nil, nil, err
+		}
+		result, err := decodeTaskRunnerManageResponse(resp)
+		if err != nil {
+			return nil, nil, err
+		}
+		if result.Error != "" {
+			return nil, nil, fmt.Errorf("%s", result.Error)
+		}
+		if result.Runner == nil {
+			return nil, nil, fmt.Errorf("spawn runner returned no runner")
+		}
+		msg := result.Message
+		if msg == "" {
+			msg = fmt.Sprintf("spawned runner #%d for task #%d", result.Runner.ID, result.Runner.TaskID)
+		}
+		return textResult(msg + "\n" + formatTaskRunnerDetails(*result.Runner)), nil, nil
+	})
+
+	gomcp.AddTool(s.mcpServer, &gomcp.Tool{
+		Name:        "runner_list",
+		Description: "List active task runners, or pass task_id to list that task's runner history.",
+	}, func(ctx context.Context, req *gomcp.CallToolRequest, input runnerListInput) (*gomcp.CallToolResult, any, error) {
+		data, _ := json.Marshal(protocol.TaskRunnerListRequest{TaskID: int64(input.TaskID)})
+		resp, err := s.hubClient.Request(ctx, protocol.WSMessage{
+			Type: protocol.MsgTaskRunnerList,
+			Data: data,
+		})
+		if err != nil {
+			return nil, nil, err
+		}
+		result, err := decodeTaskRunnerManageResponse(resp)
+		if err != nil {
+			return nil, nil, err
+		}
+		if result.Error != "" {
+			return nil, nil, fmt.Errorf("%s", result.Error)
+		}
+		if len(result.Runners) == 0 {
+			if result.Message != "" {
+				return textResult(result.Message), nil, nil
+			}
+			if input.TaskID != 0 {
+				return textResult(fmt.Sprintf("no runners for task #%d", int64(input.TaskID))), nil, nil
+			}
+			return textResult("no active runners"), nil, nil
+		}
+		var lines string
+		for _, r := range result.Runners {
+			lines += formatTaskRunnerLine(r) + "\n"
+		}
+		prefix := result.Message
+		if prefix == "" {
+			prefix = fmt.Sprintf("%d runner(s)", len(result.Runners))
+		}
+		return textResult(prefix + ":\n" + lines), nil, nil
+	})
+
+	gomcp.AddTool(s.mcpServer, &gomcp.Tool{
+		Name:        "runner_get",
+		Description: "Inspect a task runner by id, or pass task_id to inspect that task's active or latest runner.",
+	}, func(ctx context.Context, req *gomcp.CallToolRequest, input runnerGetInput) (*gomcp.CallToolResult, any, error) {
+		if input.ID == 0 && input.TaskID == 0 {
+			return nil, nil, fmt.Errorf("id or task_id required")
+		}
+		data, _ := json.Marshal(protocol.TaskRunnerGetRequest{
+			RunnerID: int64(input.ID),
+			TaskID:   int64(input.TaskID),
+		})
+		resp, err := s.hubClient.Request(ctx, protocol.WSMessage{
+			Type: protocol.MsgTaskRunnerGet,
+			Data: data,
+		})
+		if err != nil {
+			return nil, nil, err
+		}
+		result, err := decodeTaskRunnerManageResponse(resp)
+		if err != nil {
+			return nil, nil, err
+		}
+		if result.Error != "" {
+			return nil, nil, fmt.Errorf("%s", result.Error)
+		}
+		if result.Runner == nil {
+			return nil, nil, fmt.Errorf("runner not found")
+		}
+		if result.Message != "" {
+			return textResult(result.Message + "\n" + formatTaskRunnerDetails(*result.Runner)), nil, nil
+		}
+		return textResult(formatTaskRunnerDetails(*result.Runner)), nil, nil
+	})
+
+	gomcp.AddTool(s.mcpServer, &gomcp.Tool{
+		Name:        "runner_cancel",
+		Description: "Cancel an active task runner by id, or pass task_id to cancel that task's active runner.",
+	}, func(ctx context.Context, req *gomcp.CallToolRequest, input runnerCancelInput) (*gomcp.CallToolResult, any, error) {
+		if input.ID == 0 && input.TaskID == 0 {
+			return nil, nil, fmt.Errorf("id or task_id required")
+		}
+		data, _ := json.Marshal(protocol.TaskRunnerCancelRequest{
+			RunnerID: int64(input.ID),
+			TaskID:   int64(input.TaskID),
+		})
+		resp, err := s.hubClient.Request(ctx, protocol.WSMessage{
+			Type: protocol.MsgTaskRunnerCancel,
+			Data: data,
+		})
+		if err != nil {
+			return nil, nil, err
+		}
+		result, err := decodeTaskRunnerManageResponse(resp)
+		if err != nil {
+			return nil, nil, err
+		}
+		if result.Error != "" {
+			return nil, nil, fmt.Errorf("%s", result.Error)
+		}
+		if result.Runner == nil {
+			return nil, nil, fmt.Errorf("cancel runner returned no runner")
+		}
+		msg := result.Message
+		if msg == "" {
+			msg = fmt.Sprintf("cancelled runner #%d", result.Runner.ID)
+		}
+		return textResult(msg + "\n" + formatTaskRunnerDetails(*result.Runner)), nil, nil
+	})
 }
 
 func textResult(text string) *gomcp.CallToolResult {
@@ -1231,4 +1396,54 @@ func textResult(text string) *gomcp.CallToolResult {
 			&gomcp.TextContent{Text: text},
 		},
 	}
+}
+
+func decodeTaskRunnerManageResponse(resp protocol.WSMessage) (protocol.TaskRunnerManageResponse, error) {
+	var result protocol.TaskRunnerManageResponse
+	if err := json.Unmarshal(resp.Data, &result); err != nil {
+		return protocol.TaskRunnerManageResponse{}, fmt.Errorf("decode runner response: %w", err)
+	}
+	return result, nil
+}
+
+func formatTaskRunnerLine(r protocol.TaskRunner) string {
+	parent := r.ParentNick
+	if parent == "" {
+		parent = "commander"
+	}
+	return fmt.Sprintf("#%d task #%d [%s] %s parent=%s branch=%s", r.ID, r.TaskID, r.Status, r.Nickname, parent, r.BranchName)
+}
+
+func formatTaskRunnerDetails(r protocol.TaskRunner) string {
+	parent := r.ParentNick
+	if parent == "" {
+		parent = "commander"
+	}
+	var b strings.Builder
+	b.WriteString(fmt.Sprintf("Runner #%d: %s\n", r.ID, r.Nickname))
+	b.WriteString(fmt.Sprintf("Task: #%d\n", r.TaskID))
+	b.WriteString(fmt.Sprintf("Status: %s\n", r.Status))
+	b.WriteString(fmt.Sprintf("Parent: %s\n", parent))
+	if r.PID > 0 {
+		b.WriteString(fmt.Sprintf("PID: %d\n", r.PID))
+	}
+	if r.BranchName != "" {
+		b.WriteString(fmt.Sprintf("Branch: %s\n", r.BranchName))
+	}
+	if r.WorktreePath != "" {
+		b.WriteString(fmt.Sprintf("Worktree: %s\n", r.WorktreePath))
+	}
+	if r.LastSummary != "" {
+		b.WriteString(fmt.Sprintf("Last summary: %s\n", r.LastSummary))
+	}
+	if r.BlockedReason != "" {
+		b.WriteString(fmt.Sprintf("Blocked/crash reason: %s\n", r.BlockedReason))
+	}
+	if r.LastHeartbeat != "" {
+		b.WriteString(fmt.Sprintf("Last heartbeat: %s\n", r.LastHeartbeat))
+	}
+	if r.FinishedAt != "" {
+		b.WriteString(fmt.Sprintf("Finished: %s\n", r.FinishedAt))
+	}
+	return strings.TrimRight(b.String(), "\n")
 }
